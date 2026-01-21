@@ -1,0 +1,15 @@
+[package]
+name = "cow_vec"
+version = "1.0.0"
+edition = "2021"
+authors = ["Valentin Shergin"]
+description = "A vector-like container optimized for efficient cloning with copy-on-write semantics"
+license = "MIT"
+repository = "https://github.com/shergin/cow_vec"
+documentation = "https://docs.rs/cow_vec"
+readme = "README.md"
+keywords = ["vector", "copy-on-write", "cow", "persistent", "clone"]
+categories = ["data-structures", "memory-management"]
+
+[dependencies]
+typed-arena = "2"
