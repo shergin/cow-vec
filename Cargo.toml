@@ -1,11 +1,11 @@
 [package]
 name = "cow_vec"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 authors = ["Valentin Shergin"]
 description = "A vector-like container optimized for efficient cloning with copy-on-write semantics"
 license = "MIT"
-repository = "https://github.com/shergin/cow_vec"
+repository = "https://github.com/shergin/cow-vec"
 documentation = "https://docs.rs/cow_vec"
 readme = "README.md"
 keywords = ["vector", "copy-on-write", "cow", "persistent", "clone"]
