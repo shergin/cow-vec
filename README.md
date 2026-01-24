@@ -8,10 +8,11 @@ In many algorithms, we need to clone a vector and then make small modifications 
 
 `CowVec` solves this by:
 1. Storing all values in a shared arena (via `Arc`)
-2. Each instance maintains only a vector of pointers into the arena
-3. Cloning copies only the pointer vector, not the actual data
+2. Each instance maintains a vector of pointers into the arena (also via `Arc`)
+3. Cloning is O(1) - just incrementing reference counts
+4. The pointer vector is copied only on first mutation (copy-on-write)
 
-This makes cloning O(n) in pointer copies rather than O(n) in element copies - significantly faster for large or complex types.
+This makes cloning O(1) regardless of vector size - the actual copying is deferred until (and only if) a mutation occurs.
 
 ## Use Cases
 
@@ -41,6 +42,16 @@ vec.push(6);
 vec.pop();
 vec.reverse();
 let v: Vec<i32> = vec.to_vec();
+
+// Introspection: check sharing status
+let vec1 = CowVec::from(vec![1, 2, 3]);
+let mut vec2 = vec1.clone();
+assert!(vec1.is_structure_shared());  // Pointer vector is shared
+assert!(vec1.is_storage_shared());    // Arena is shared
+
+vec2.push(4);  // Triggers COW on structure
+assert!(!vec2.is_structure_shared()); // vec2 now has its own pointer vector
+assert!(vec2.is_storage_shared());    // Arena still shared
 ```
 
 ## Limitations
@@ -92,9 +103,9 @@ The `set()` method requires `T: Clone` because it allocates a new copy in the ar
 
 Each `CowVec` instance stores:
 - `Arc<CowArena<T>>` (pointer + reference count)
-- `Vec<*const T>` (pointer per element)
+- `Arc<Vec<*const T>>` (shared pointer vector, pointer per element)
 
-For very small types (e.g., `u8`), the pointer overhead may exceed the element size. Consider using standard `Vec` for small, cheap-to-copy types.
+Clones share both the arena and the pointer vector until mutation. For very small types (e.g., `u8`), the pointer overhead may exceed the element size. Consider using standard `Vec` for small, cheap-to-copy types.
 
 ## Implementation Details
 
@@ -112,14 +123,16 @@ The arena guarantees that allocated values are never moved or deallocated until 
 
 ### Pointer Storage
 
-Each `CowVec` instance maintains a vector of raw pointers:
+Each `CowVec` instance maintains a shared vector of raw pointers:
 
 ```rust,ignore
 pub struct CowVec<T> {
     arena: Arc<CowArena<T>>,
-    items: Vec<*const T>,
+    items: Arc<Vec<*const T>>,
 }
 ```
+
+The `items` vector is wrapped in `Arc` for O(1) cloning. On mutation, `Arc::make_mut()` is used to clone the vector only if it's shared with other instances (copy-on-write for the structure itself).
 
 ### Safety Invariants
 
@@ -139,43 +152,48 @@ The use of raw pointers is safe because:
 
 ### Copy-on-Write
 
-The `set()` method implements copy-on-write:
+Copy-on-write operates at two levels:
+
+1. **Structure level**: The pointer vector is shared via `Arc`. On first mutation, if shared, the vector is cloned.
+2. **Value level**: The `set()` method allocates a new value in the arena and updates only this instance's pointer.
 
 ```rust,ignore
 pub fn set(&mut self, index: usize, value: T) {
     let ptr = self.arena.alloc(value);  // Allocate new value
-    self.items[index] = ptr;             // Update only this instance's pointer
+    self.items_mut()[index] = ptr;      // COW: clone vec if shared, then update
 }
 ```
 
-Other clones continue pointing to the original value.
+Other clones continue pointing to the original values with their original structure.
 
 ## Performance Characteristics
 
 | Operation | Time Complexity | Notes |
 |-----------|-----------------|-------|
 | `new()` | O(1) | |
-| `clone()` | O(n) | Pointer memcpy only - extremely fast |
-| `clone_with_max_capacity()` | O(n) | Pointer memcpy if under limit, element clones if over |
-| `push()` | O(1) amortized | Arena allocation + vec push |
+| `clone()` | **O(1)** | Just increments two Arc reference counts |
+| `first mutation after clone` | O(n) | Copies the pointer vector (deferred COW) |
+| `clone_with_max_capacity()` | O(n) | Arc clone if under limit, element clones if over |
+| `push()` | O(1) amortized | Arena allocation + vec push (+ COW if shared) |
 | `get()` | O(1) | Pointer dereference |
-| `set()` | O(1) | Arena allocation + pointer update |
-| `pop()` | O(1) | |
-| `remove()` | O(n) | Pointer memcpy to shift elements |
-| `reverse()` | O(n) | In-place pointer swap |
+| `set()` | O(1) | Arena allocation + pointer update (+ COW if shared) |
+| `pop()` | O(1) | (+ COW if shared) |
+| `remove()` | O(n) | Pointer memcpy to shift elements (+ COW if shared) |
+| `reverse()` | O(n) | In-place pointer swap (+ COW if shared) |
 | `iter()` | O(1) | Iterator creation |
 
-Note: All O(n) operations work on the pointer vector (8 bytes per element), not on the actual data.
+Note: "COW if shared" means the pointer vector is cloned only if this instance shares it with other clones. This is a one-time O(n) cost on first mutation.
 
 **Example**: A vector of 42 million objects, where each element contains nested `Vec`s, `HashMap`s, and `String`s:
 - **Regular `Vec` clone**: Runs 42M `Clone::clone()` calls, each allocating memory, copying nested structures, updating reference counts, and potentially triggering the allocator
-- **`CowVec` clone**: A single `memcpy` of 42M × 8 = **~320 MB** of pointers - no allocations, no `Clone` trait calls, no nested structure traversal
+- **`CowVec` clone**: **O(1)** - just two atomic reference count increments, regardless of size
+- **First mutation after clone**: A single `memcpy` of 42M × 8 = ~320 MB of pointers
 
-These bulk copies are hardware-optimized on modern CPUs:
+The deferred copy is hardware-optimized on modern CPUs:
 - **x86 (Ivy Bridge+)**: Uses ERMSB (Enhanced REP MOVSB) with automatic vectorization
 - **ARM64**: Uses optimized LDP/STP (load/store pair) sequences copying 16+ bytes per cycle
 
-At ~50 GB/s memory bandwidth, cloning 320 MB of pointers takes ~6ms - regardless of how complex the elements are.
+At ~50 GB/s memory bandwidth, copying 320 MB of pointers takes ~6ms - but only when you actually mutate.
 
 ## Related Work: Persistent Data Structures
 
@@ -204,18 +222,19 @@ Several mature crates implement persistent vectors with more sophisticated algor
 
 | Aspect | CowVec | im/rpds |
 |--------|--------|---------|
-| Clone | O(n) pointer copies (trivially cheap) | O(1) or O(log n) |
+| Clone | **O(1)** (deferred COW) | O(1) or O(log n) |
+| First mutation after clone | O(n) pointer copies | O(log n) |
 | Random access | O(1) direct lookup | O(log n) tree traversal |
 | Cache locality | Excellent (contiguous pointer array) | Poor (scattered tree nodes) |
 | Access latency | Single pointer dereference | Multiple pointer chases |
 | Allocations per insert | 1 arena bump (very fast) | O(log n) tree nodes |
-| Modification | Arena allocation | Tree node allocation |
+| Modification | Arena allocation + COW | Tree node allocation |
 | Memory reclaim | Manual via `clone_with_max_capacity` | Automatic via ref-counting |
 | Best for | Frequent clones, few modifications | Many modifications |
 
 **Key trade-offs:**
 
-- `CowVec` clone is **O(n) but trivially cheap** - it copies only pointers (8 bytes each), not element data. For a 1000-element vector, clone copies ~8KB of pointers regardless of element size.
+- `CowVec` clone is **O(1)** - just two atomic reference count increments. The pointer vector is copied only on first mutation (if shared).
 - `CowVec` has **O(1) random access** (direct pointer lookup) vs O(log n) for tree-based structures.
 - `CowVec` uses **arena allocation** (bump pointer, no syscalls) vs tree-based structures that allocate O(log n) nodes per modification through the standard allocator.
 - `CowVec` **does not reclaim memory** automatically; use `clone_with_max_capacity()` for compaction.
@@ -229,14 +248,13 @@ Several mature crates implement persistent vectors with more sophisticated algor
 - For hot loops accessing elements by index, `CowVec` provides predictable, low-latency performance.
 
 **Choose `CowVec` when:**
-- You clone frequently but modify sparingly.
+- You clone frequently but modify sparingly (or not at all).
 - You need O(1) indexed access with minimal latency.
 - Cache-friendly iteration performance matters.
 - Vectors are short-lived or periodically compacted.
-- Simplicity matters more than optimal clone performance.
+- Simplicity matters.
 
 **Choose `im`/`rpds` when:**
-- You need O(1) clone operations.
 - You perform many modifications across many clones.
 - Automatic memory reclamation is important.
 - You're building long-lived persistent data structures.

@@ -940,3 +940,90 @@ fn test_splice_does_not_affect_clones() {
     assert_eq!(vec1.to_vec(), vec![1, 2, 3, 4, 5]);
     assert_eq!(vec2.to_vec(), vec![1, 10, 20, 4, 5]);
 }
+
+// ============================================================================
+// Sharing introspection tests
+// ============================================================================
+
+#[test]
+fn test_is_structure_shared_fresh_vec() {
+    let vec = CowVec::from(vec![1, 2, 3]);
+    assert!(!vec.is_structure_shared());
+}
+
+#[test]
+fn test_is_storage_shared_fresh_vec() {
+    let vec = CowVec::from(vec![1, 2, 3]);
+    assert!(!vec.is_storage_shared());
+}
+
+#[test]
+fn test_is_structure_shared_after_clone() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let vec2 = vec1.clone();
+    assert!(vec1.is_structure_shared());
+    assert!(vec2.is_structure_shared());
+}
+
+#[test]
+fn test_is_storage_shared_after_clone() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let vec2 = vec1.clone();
+    assert!(vec1.is_storage_shared());
+    assert!(vec2.is_storage_shared());
+}
+
+#[test]
+fn test_is_structure_shared_after_mutation() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let mut vec2 = vec1.clone();
+
+    // Before mutation, both share structure
+    assert!(vec1.is_structure_shared());
+    assert!(vec2.is_structure_shared());
+
+    // Mutation triggers COW on structure
+    vec2.push(4);
+
+    // vec2 now has its own structure, vec1's structure is no longer shared
+    assert!(!vec1.is_structure_shared());
+    assert!(!vec2.is_structure_shared());
+}
+
+#[test]
+fn test_is_storage_shared_after_mutation() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let mut vec2 = vec1.clone();
+
+    // Mutation does NOT affect storage sharing (arena is always shared)
+    vec2.push(4);
+
+    assert!(vec1.is_storage_shared());
+    assert!(vec2.is_storage_shared());
+}
+
+#[test]
+fn test_sharing_with_multiple_clones() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let vec2 = vec1.clone();
+    let mut vec3 = vec1.clone();
+
+    // All three share structure
+    assert!(vec1.is_structure_shared());
+    assert!(vec2.is_structure_shared());
+    assert!(vec3.is_structure_shared());
+
+    // vec3 mutates, gets its own structure
+    vec3.push(4);
+
+    // vec1 and vec2 still share structure with each other
+    assert!(vec1.is_structure_shared());
+    assert!(vec2.is_structure_shared());
+    // vec3 has its own unique structure
+    assert!(!vec3.is_structure_shared());
+
+    // All three still share storage
+    assert!(vec1.is_storage_shared());
+    assert!(vec2.is_storage_shared());
+    assert!(vec3.is_storage_shared());
+}
