@@ -108,6 +108,30 @@ impl<T> CowVec<T> {
         self.items.is_empty()
     }
 
+    /// Returns the elements as a slice of references.
+    ///
+    /// This provides efficient access to all elements without iteration,
+    /// useful when you need to pass the data to APIs expecting `&[&T]`.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let vec = CowVec::from(vec![1, 2, 3]);
+    /// let slice: &[&i32] = vec.as_slice();
+    /// assert_eq!(slice.len(), 3);
+    /// assert_eq!(*slice[0], 1);
+    /// ```
+    pub fn as_slice(&self) -> &[&T] {
+        // SAFETY: This transmute is sound because:
+        // 1. `*const T` and `&T` have identical memory layouts (both are pointers)
+        // 2. All pointers in `self.items` are valid for the arena's lifetime
+        // 3. The arena outlives this `CowVec` (guaranteed by Arc)
+        // 4. The returned slice borrows `&self`, so it cannot outlive the CowVec
+        // 5. The arena is append-only, so pointers are never invalidated
+        unsafe { std::mem::transmute(self.items.as_slice()) }
+    }
+
     /// Returns a reference to the element at the given index, or `None` if out of bounds.
     pub fn get(&self, index: usize) -> Option<&T> {
         self.items.get(index).map(|ptr| {
