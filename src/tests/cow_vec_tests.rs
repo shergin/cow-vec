@@ -689,3 +689,38 @@ fn test_as_slice_supports_slice_methods() {
     assert_eq!(*sub_slice[1], 8);
     assert_eq!(*sub_slice[2], 1);
 }
+
+#[test]
+fn test_debug_basic() {
+    let vec = CowVec::from(vec![1, 2, 3]);
+    let debug_str = format!("{:?}", vec);
+    assert_eq!(debug_str, "[1, 2, 3]");
+}
+
+#[test]
+fn test_debug_empty() {
+    let vec: CowVec<i32> = CowVec::new();
+    let debug_str = format!("{:?}", vec);
+    assert_eq!(debug_str, "[]");
+}
+
+#[test]
+fn test_debug_single_element() {
+    let vec = CowVec::from(vec![42]);
+    let debug_str = format!("{:?}", vec);
+    assert_eq!(debug_str, "[42]");
+}
+
+#[test]
+fn test_debug_with_strings() {
+    let vec = CowVec::from(vec!["hello", "world"]);
+    let debug_str = format!("{:?}", vec);
+    assert_eq!(debug_str, "[\"hello\", \"world\"]");
+}
+
+#[test]
+fn test_debug_pretty_print() {
+    let vec = CowVec::from(vec![1, 2, 3]);
+    let debug_str = format!("{:#?}", vec);
+    assert_eq!(debug_str, "[\n    1,\n    2,\n    3,\n]");
+}

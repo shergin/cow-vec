@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::{Index, IndexMut};
 use std::sync::{Arc, Mutex};
 
@@ -327,6 +328,12 @@ impl<T> Clone for CowVec<T> {
             arena: Arc::clone(&self.arena),
             items: self.items.clone(),
         }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for CowVec<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
