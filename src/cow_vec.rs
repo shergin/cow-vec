@@ -71,7 +71,7 @@ impl<T> CowArena<T> {
 /// ```
 pub struct CowVec<T> {
     arena: Arc<CowArena<T>>,
-    items: Vec<*const T>,
+    items: Arc<Vec<*const T>>,
 }
 
 // SAFETY: CowVec is Send+Sync because:
@@ -83,11 +83,20 @@ unsafe impl<T: Send + Sync> Send for CowVec<T> {}
 unsafe impl<T: Send + Sync> Sync for CowVec<T> {}
 
 impl<T> CowVec<T> {
+    /// Returns a mutable reference to the items vector.
+    ///
+    /// If the items Arc is shared with other CowVec instances, this will
+    /// clone the vector first (copy-on-write semantics).
+    #[inline]
+    fn items_mut(&mut self) -> &mut Vec<*const T> {
+        Arc::make_mut(&mut self.items)
+    }
+
     /// Creates a new empty `CowVec`.
     pub fn new() -> Self {
         Self {
             arena: Arc::new(CowArena::new()),
-            items: Vec::new(),
+            items: Arc::new(Vec::new()),
         }
     }
 
@@ -95,7 +104,7 @@ impl<T> CowVec<T> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             arena: Arc::new(CowArena::with_capacity(capacity)),
-            items: Vec::with_capacity(capacity),
+            items: Arc::new(Vec::with_capacity(capacity)),
         }
     }
 
@@ -107,6 +116,22 @@ impl<T> CowVec<T> {
     /// Returns `true` if this vector contains no elements.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Returns `true` if the structure (element pointers/order) is shared with other clones.
+    ///
+    /// When this returns `true`, the next mutation will trigger a copy of the
+    /// internal pointer vector (copy-on-write semantics).
+    pub fn is_structure_shared(&self) -> bool {
+        Arc::strong_count(&self.items) > 1
+    }
+
+    /// Returns `true` if the storage (arena with actual values) is shared with other clones.
+    ///
+    /// This typically returns `true` after any clone operation, as all clones share
+    /// the same arena for value storage.
+    pub fn is_storage_shared(&self) -> bool {
+        Arc::strong_count(&self.arena) > 1
     }
 
     /// Returns the elements as a slice of references.
@@ -150,7 +175,7 @@ impl<T> CowVec<T> {
     /// pointer list is updated to include it.
     pub fn push(&mut self, value: T) {
         let ptr = self.arena.alloc(value);
-        self.items.push(ptr);
+        self.items_mut().push(ptr);
     }
 
     /// Returns an iterator over references to the elements.
@@ -180,7 +205,7 @@ impl<T> CowVec<T> {
     /// Note: The value remains in the shared arena but is no longer
     /// accessible through this `CowVec` instance.
     pub fn pop(&mut self) -> Option<&T> {
-        self.items.pop().map(|ptr| {
+        self.items_mut().pop().map(|ptr| {
             // SAFETY: Same as get() - pointer is valid for arena's lifetime
             unsafe { &*ptr }
         })
@@ -196,7 +221,7 @@ impl<T> CowVec<T> {
     /// # Panics
     /// Panics if `index >= len()`.
     pub fn remove(&mut self, index: usize) -> &T {
-        let ptr = self.items.remove(index);
+        let ptr = self.items_mut().remove(index);
         // SAFETY: Same as get() - pointer is valid for arena's lifetime
         unsafe { &*ptr }
     }
@@ -206,12 +231,12 @@ impl<T> CowVec<T> {
     /// # Panics
     /// Panics if either index is out of bounds.
     pub fn swap(&mut self, a: usize, b: usize) {
-        self.items.swap(a, b);
+        self.items_mut().swap(a, b);
     }
 
     /// Reverses the order of elements in the vector.
     pub fn reverse(&mut self) {
-        self.items.reverse();
+        self.items_mut().reverse();
     }
 
     /// Shortens the vector, keeping the first `len` elements.
@@ -220,7 +245,7 @@ impl<T> CowVec<T> {
     ///
     /// Note: Removed values remain in the shared arena.
     pub fn truncate(&mut self, len: usize) {
-        self.items.truncate(len);
+        self.items_mut().truncate(len);
     }
 
     /// Clears the vector, removing all elements.
@@ -228,7 +253,7 @@ impl<T> CowVec<T> {
     /// Note: Values remain in the shared arena but are no longer
     /// accessible through this `CowVec` instance.
     pub fn clear(&mut self) {
-        self.items.clear();
+        self.items_mut().clear();
     }
 
     /// Extends the vector with elements from an iterator.
@@ -261,7 +286,7 @@ impl<T> CowVec<T> {
     /// ```
     pub fn insert(&mut self, index: usize, value: T) {
         let ptr = self.arena.alloc(value);
-        self.items.insert(index, ptr);
+        self.items_mut().insert(index, ptr);
     }
 
     /// Retains only the elements specified by the predicate.
@@ -282,7 +307,7 @@ impl<T> CowVec<T> {
     where
         F: FnMut(&T) -> bool,
     {
-        self.items.retain(|ptr| {
+        self.items_mut().retain(|ptr| {
             // SAFETY: Pointer is valid for arena's lifetime
             let value = unsafe { &**ptr };
             f(value)
@@ -310,10 +335,10 @@ impl<T> CowVec<T> {
     /// assert_eq!(tail.to_vec(), vec![4, 5]);
     /// ```
     pub fn split_off(&mut self, at: usize) -> Self {
-        let tail_items = self.items.split_off(at);
+        let tail_items = self.items_mut().split_off(at);
         Self {
             arena: Arc::clone(&self.arena),
-            items: tail_items,
+            items: Arc::new(tail_items),
         }
     }
 
@@ -356,7 +381,7 @@ impl<T> CowVec<T> {
             .collect();
 
         // Splice the pointer vector and collect removed pointers
-        let removed_ptrs: Vec<*const T> = self.items.splice(start..end, new_ptrs).collect();
+        let removed_ptrs: Vec<*const T> = self.items_mut().splice(start..end, new_ptrs).collect();
 
         // Convert removed pointers to references
         removed_ptrs
@@ -404,7 +429,7 @@ impl<T: Clone> CowVec<T> {
 
         Self {
             arena: new_arena,
-            items: new_items,
+            items: Arc::new(new_items),
         }
     }
 }
@@ -427,7 +452,7 @@ impl<T> CowVec<T> {
             );
         }
         let ptr = self.arena.alloc(value);
-        self.items[index] = ptr;
+        self.items_mut()[index] = ptr;
     }
 }
 
@@ -441,14 +466,18 @@ impl<T> Default for CowVec<T> {
 }
 
 impl<T> Clone for CowVec<T> {
-    /// Clones this `CowVec`.
+    /// Clones this `CowVec` in O(1) time.
     ///
-    /// This is an efficient operation: the arena is shared via `Arc`, and only
-    /// the pointer vector is cloned.
+    /// Both the arena and the items vector are shared via `Arc`. The items
+    /// vector will be automatically cloned on the first mutation to either
+    /// copy (copy-on-write semantics).
+    ///
+    /// This makes cloning extremely cheap, with the cost of copying the items
+    /// vector deferred until (and only if) a mutation occurs.
     fn clone(&self) -> Self {
         Self {
             arena: Arc::clone(&self.arena),
-            items: self.items.clone(),
+            items: Arc::clone(&self.items),
         }
     }
 }
@@ -464,7 +493,10 @@ impl<T> From<Vec<T>> for CowVec<T> {
     fn from(vec: Vec<T>) -> Self {
         let arena = Arc::new(CowArena::with_capacity(vec.len()));
         let items: Vec<*const T> = vec.into_iter().map(|item| arena.alloc(item)).collect();
-        Self { arena, items }
+        Self {
+            arena,
+            items: Arc::new(items),
+        }
     }
 }
 
@@ -529,7 +561,7 @@ impl<T: Clone> IndexMut<usize> for CowVec<T> {
         // Clone the current value to a new arena location (copy-on-write).
         let current = unsafe { &*self.items[index] }.clone();
         let ptr = self.arena.alloc(current);
-        self.items[index] = ptr;
+        self.items_mut()[index] = ptr;
         // SAFETY: The pointer was just allocated and is valid. We have exclusive
         // access via &mut self. The arena allocates mutable memory.
         unsafe { &mut *(ptr as *mut T) }
