@@ -1,5 +1,5 @@
 use std::fmt;
-use std::ops::{Index, IndexMut};
+use std::ops::{Bound, Index, IndexMut, RangeBounds};
 use std::sync::{Arc, Mutex};
 
 use typed_arena::Arena;
@@ -239,11 +239,133 @@ impl<T> CowVec<T> {
     }
 
     /// Returns the index of the first element matching the predicate.
-    pub fn position<P>(&self, mut predicate: P) -> Option<usize>
+    pub fn position<P>(&self, predicate: P) -> Option<usize>
     where
         P: FnMut(&T) -> bool,
     {
-        self.iter().position(|item| predicate(item))
+        self.iter().position(predicate)
+    }
+
+    /// Inserts an element at position `index`, shifting all elements after it to the right.
+    ///
+    /// # Panics
+    /// Panics if `index > len()`.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut vec = CowVec::from(vec![1, 2, 3]);
+    /// vec.insert(1, 10);
+    /// assert_eq!(vec.to_vec(), vec![1, 10, 2, 3]);
+    /// ```
+    pub fn insert(&mut self, index: usize, value: T) {
+        let ptr = self.arena.alloc(value);
+        self.items.insert(index, ptr);
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// Removes all elements for which the predicate returns `false`.
+    ///
+    /// Note: Removed values remain in the shared arena.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    /// vec.retain(|&x| x % 2 == 0);
+    /// assert_eq!(vec.to_vec(), vec![2, 4]);
+    /// ```
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.items.retain(|ptr| {
+            // SAFETY: Pointer is valid for arena's lifetime
+            let value = unsafe { &**ptr };
+            f(value)
+        });
+    }
+
+    /// Splits the vector into two at the given index.
+    ///
+    /// Returns a new `CowVec` containing elements from `at` to the end.
+    /// After this call, `self` contains elements `[0, at)` and the returned
+    /// `CowVec` contains elements `[at, len)`.
+    ///
+    /// Both vectors share the same arena, so this is an efficient operation.
+    ///
+    /// # Panics
+    /// Panics if `at > len()`.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    /// let tail = vec.split_off(3);
+    /// assert_eq!(vec.to_vec(), vec![1, 2, 3]);
+    /// assert_eq!(tail.to_vec(), vec![4, 5]);
+    /// ```
+    pub fn split_off(&mut self, at: usize) -> Self {
+        let tail_items = self.items.split_off(at);
+        Self {
+            arena: Arc::clone(&self.arena),
+            items: tail_items,
+        }
+    }
+
+    /// Removes the specified range and replaces it with elements from the iterator.
+    ///
+    /// Returns the removed elements as a `Vec` of references.
+    ///
+    /// # Panics
+    /// Panics if the range is out of bounds.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    /// let removed: Vec<&i32> = vec.splice(1..3, vec![10, 20, 30]);
+    /// assert_eq!(removed, vec![&2, &3]);
+    /// assert_eq!(vec.to_vec(), vec![1, 10, 20, 30, 4, 5]);
+    /// ```
+    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Vec<&T>
+    where
+        R: RangeBounds<usize>,
+        I: IntoIterator<Item = T>,
+    {
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.len(),
+        };
+
+        // Allocate new elements in arena
+        let new_ptrs: Vec<*const T> = replace_with
+            .into_iter()
+            .map(|item| self.arena.alloc(item))
+            .collect();
+
+        // Splice the pointer vector and collect removed pointers
+        let removed_ptrs: Vec<*const T> = self.items.splice(start..end, new_ptrs).collect();
+
+        // Convert removed pointers to references
+        removed_ptrs
+            .into_iter()
+            .map(|ptr| {
+                // SAFETY: Pointer is valid for arena's lifetime
+                unsafe { &*ptr }
+            })
+            .collect()
     }
 }
 
