@@ -595,3 +595,97 @@ fn test_contains_empty() {
     let vec: CowVec<i32> = CowVec::new();
     assert!(!vec.contains(&1));
 }
+
+#[test]
+fn test_as_slice_basic() {
+    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let slice: &[&i32] = vec.as_slice();
+
+    assert_eq!(slice.len(), 5);
+    assert_eq!(*slice[0], 1);
+    assert_eq!(*slice[1], 2);
+    assert_eq!(*slice[2], 3);
+    assert_eq!(*slice[3], 4);
+    assert_eq!(*slice[4], 5);
+}
+
+#[test]
+fn test_as_slice_empty() {
+    let vec: CowVec<i32> = CowVec::new();
+    let slice = vec.as_slice();
+    assert!(slice.is_empty());
+}
+
+#[test]
+fn test_as_slice_single_element() {
+    let vec = CowVec::from(vec![42]);
+    let slice = vec.as_slice();
+    assert_eq!(slice.len(), 1);
+    assert_eq!(*slice[0], 42);
+}
+
+#[test]
+fn test_as_slice_after_modifications() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.set(1, 20);
+    vec.push(4);
+
+    let slice = vec.as_slice();
+    assert_eq!(slice.len(), 4);
+    assert_eq!(*slice[0], 1);
+    assert_eq!(*slice[1], 20);
+    assert_eq!(*slice[2], 3);
+    assert_eq!(*slice[3], 4);
+}
+
+#[test]
+fn test_as_slice_clone_independence() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let mut vec2 = vec1.clone();
+    vec2.set(0, 100);
+
+    let slice1 = vec1.as_slice();
+    let slice2 = vec2.as_slice();
+
+    // Slices should reflect their respective CowVec states.
+    assert_eq!(*slice1[0], 1);
+    assert_eq!(*slice2[0], 100);
+}
+
+#[test]
+fn test_as_slice_with_strings() {
+    let vec = CowVec::from(vec!["hello", "world", "rust"]);
+    let slice = vec.as_slice();
+
+    assert_eq!(slice.len(), 3);
+    assert_eq!(*slice[0], "hello");
+    assert_eq!(*slice[1], "world");
+    assert_eq!(*slice[2], "rust");
+}
+
+#[test]
+fn test_as_slice_can_be_iterated() {
+    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let slice = vec.as_slice();
+
+    let sum: i32 = slice.iter().map(|&&x| x).sum();
+    assert_eq!(sum, 15);
+}
+
+#[test]
+fn test_as_slice_supports_slice_methods() {
+    let vec = CowVec::from(vec![5, 2, 8, 1, 9]);
+    let slice = vec.as_slice();
+
+    // Test various slice methods.
+    assert_eq!(slice.first(), Some(&&5));
+    assert_eq!(slice.last(), Some(&&9));
+    assert!(!slice.is_empty());
+
+    // Test slicing.
+    let sub_slice = &slice[1..4];
+    assert_eq!(sub_slice.len(), 3);
+    assert_eq!(*sub_slice[0], 2);
+    assert_eq!(*sub_slice[1], 8);
+    assert_eq!(*sub_slice[2], 1);
+}
