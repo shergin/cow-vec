@@ -724,3 +724,219 @@ fn test_debug_pretty_print() {
     let debug_str = format!("{:#?}", vec);
     assert_eq!(debug_str, "[\n    1,\n    2,\n    3,\n]");
 }
+
+// ============ insert tests ============
+
+#[test]
+fn test_insert_middle() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.insert(1, 10);
+    assert_eq!(vec.to_vec(), vec![1, 10, 2, 3]);
+}
+
+#[test]
+fn test_insert_beginning() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.insert(0, 10);
+    assert_eq!(vec.to_vec(), vec![10, 1, 2, 3]);
+}
+
+#[test]
+fn test_insert_end() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.insert(3, 10);
+    assert_eq!(vec.to_vec(), vec![1, 2, 3, 10]);
+}
+
+#[test]
+fn test_insert_empty() {
+    let mut vec: CowVec<i32> = CowVec::new();
+    vec.insert(0, 42);
+    assert_eq!(vec.to_vec(), vec![42]);
+}
+
+#[test]
+fn test_insert_does_not_affect_clones() {
+    let vec1 = CowVec::from(vec![1, 2, 3]);
+    let mut vec2 = vec1.clone();
+    vec2.insert(1, 10);
+    assert_eq!(vec1.to_vec(), vec![1, 2, 3]);
+    assert_eq!(vec2.to_vec(), vec![1, 10, 2, 3]);
+}
+
+#[test]
+#[should_panic]
+fn test_insert_out_of_bounds() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.insert(4, 10);
+}
+
+// ============ retain tests ============
+
+#[test]
+fn test_retain_even() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5, 6]);
+    vec.retain(|&x| x % 2 == 0);
+    assert_eq!(vec.to_vec(), vec![2, 4, 6]);
+}
+
+#[test]
+fn test_retain_all() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.retain(|_| true);
+    assert_eq!(vec.to_vec(), vec![1, 2, 3]);
+}
+
+#[test]
+fn test_retain_none() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.retain(|_| false);
+    assert!(vec.is_empty());
+}
+
+#[test]
+fn test_retain_empty() {
+    let mut vec: CowVec<i32> = CowVec::new();
+    vec.retain(|_| true);
+    assert!(vec.is_empty());
+}
+
+#[test]
+fn test_retain_does_not_affect_clones() {
+    let vec1 = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let mut vec2 = vec1.clone();
+    vec2.retain(|&x| x > 2);
+    assert_eq!(vec1.to_vec(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(vec2.to_vec(), vec![3, 4, 5]);
+}
+
+#[test]
+fn test_retain_with_strings() {
+    let mut vec = CowVec::from(vec!["apple", "banana", "cherry", "apricot"]);
+    vec.retain(|s| s.starts_with('a'));
+    assert_eq!(vec.to_vec(), vec!["apple", "apricot"]);
+}
+
+// ============ split_off tests ============
+
+#[test]
+fn test_split_off_middle() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let tail = vec.split_off(3);
+    assert_eq!(vec.to_vec(), vec![1, 2, 3]);
+    assert_eq!(tail.to_vec(), vec![4, 5]);
+}
+
+#[test]
+fn test_split_off_beginning() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    let tail = vec.split_off(0);
+    assert!(vec.is_empty());
+    assert_eq!(tail.to_vec(), vec![1, 2, 3]);
+}
+
+#[test]
+fn test_split_off_end() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    let tail = vec.split_off(3);
+    assert_eq!(vec.to_vec(), vec![1, 2, 3]);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn test_split_off_shares_arena() {
+    let mut vec1 = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let vec2 = vec1.split_off(2);
+
+    // Both should work independently
+    assert_eq!(vec1[0], 1);
+    assert_eq!(vec1[1], 2);
+    assert_eq!(vec2[0], 3);
+    assert_eq!(vec2[1], 4);
+    assert_eq!(vec2[2], 5);
+}
+
+#[test]
+fn test_split_off_does_not_affect_original_clones() {
+    let original = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let mut to_split = original.clone();
+    let tail = to_split.split_off(2);
+
+    assert_eq!(original.to_vec(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(to_split.to_vec(), vec![1, 2]);
+    assert_eq!(tail.to_vec(), vec![3, 4, 5]);
+}
+
+#[test]
+#[should_panic]
+fn test_split_off_out_of_bounds() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    vec.split_off(4);
+}
+
+// ============ splice tests ============
+
+#[test]
+fn test_splice_replace_middle() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let removed: Vec<&i32> = vec.splice(1..3, vec![10, 20, 30]);
+    assert_eq!(removed, vec![&2, &3]);
+    assert_eq!(vec.to_vec(), vec![1, 10, 20, 30, 4, 5]);
+}
+
+#[test]
+fn test_splice_remove_only() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let removed: Vec<&i32> = vec.splice(1..4, vec![]);
+    assert_eq!(removed, vec![&2, &3, &4]);
+    assert_eq!(vec.to_vec(), vec![1, 5]);
+}
+
+#[test]
+fn test_splice_insert_only() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    let removed: Vec<&i32> = vec.splice(1..1, vec![10, 20]);
+    assert!(removed.is_empty());
+    assert_eq!(vec.to_vec(), vec![1, 10, 20, 2, 3]);
+}
+
+#[test]
+fn test_splice_replace_beginning() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let removed: Vec<&i32> = vec.splice(0..2, vec![10]);
+    assert_eq!(removed, vec![&1, &2]);
+    assert_eq!(vec.to_vec(), vec![10, 3, 4, 5]);
+}
+
+#[test]
+fn test_splice_replace_end() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let removed: Vec<&i32> = vec.splice(3..5, vec![10, 20, 30]);
+    assert_eq!(removed, vec![&4, &5]);
+    assert_eq!(vec.to_vec(), vec![1, 2, 3, 10, 20, 30]);
+}
+
+#[test]
+fn test_splice_replace_all() {
+    let mut vec = CowVec::from(vec![1, 2, 3]);
+    let removed: Vec<&i32> = vec.splice(.., vec![10, 20]);
+    assert_eq!(removed, vec![&1, &2, &3]);
+    assert_eq!(vec.to_vec(), vec![10, 20]);
+}
+
+#[test]
+fn test_splice_inclusive_range() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let removed: Vec<&i32> = vec.splice(1..=3, vec![10]);
+    assert_eq!(removed, vec![&2, &3, &4]);
+    assert_eq!(vec.to_vec(), vec![1, 10, 5]);
+}
+
+#[test]
+fn test_splice_does_not_affect_clones() {
+    let vec1 = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let mut vec2 = vec1.clone();
+    vec2.splice(1..3, vec![10, 20]);
+    assert_eq!(vec1.to_vec(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(vec2.to_vec(), vec![1, 10, 20, 4, 5]);
+}
