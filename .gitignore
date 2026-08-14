@@ -22,3 +22,6 @@ target
 
 # Claude Code
 .claude/settings.local.json
+
+# Local notes
+notes/
