@@ -1,80 +1,26 @@
 use std::fmt;
 use std::ops::{Bound, Index, RangeBounds};
-use std::sync::{Arc, Mutex};
-
-use typed_arena::Arena;
+use std::sync::Arc;
 
 use super::CowVecIter;
-
-/// Shared arena that stores values allocated by `CowVec` instances.
-///
-/// The arena is append-only: values are never removed or moved once allocated.
-/// This guarantees that pointers to arena items remain valid for the arena's lifetime.
-struct CowArena<T> {
-    arena: Mutex<Arena<T>>,
-}
-
-impl<T> CowArena<T> {
-    fn new() -> Self {
-        Self {
-            arena: Mutex::new(Arena::new()),
-        }
-    }
-
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            arena: Mutex::new(Arena::with_capacity(capacity)),
-        }
-    }
-
-    /// Allocates a value in the arena and returns a raw pointer to it.
-    ///
-    /// # Safety
-    /// The returned pointer is valid for the lifetime of the arena.
-    /// Since the arena is append-only and wrapped in Arc, the pointer
-    /// remains valid as long as any CowVec holds a reference to this arena.
-    fn alloc(&self, value: T) -> *const T {
-        let arena = self.arena.lock().unwrap();
-        let reference = arena.alloc(value);
-        // Cast through *mut so the pointer keeps write provenance; make_mut
-        // writes through it after casting back. A direct `&mut T as *const T`
-        // reborrows as shared and makes that write undefined behavior.
-        reference as *mut T as *const T
-    }
-
-    /// Allocates every value from the iterator under a single lock and
-    /// returns their pointers.
-    ///
-    /// The values are placed contiguously in the arena, so bulk-loaded
-    /// elements are adjacent in memory.
-    ///
-    /// # Safety
-    /// Same guarantees as [`alloc`](Self::alloc).
-    fn alloc_extend<I: IntoIterator<Item = T>>(&self, iter: I) -> Vec<*const T> {
-        let arena = self.arena.lock().unwrap();
-        let slice = arena.alloc_extend(iter);
-        slice.iter_mut().map(|r| r as *mut T as *const T).collect()
-    }
-
-    /// Returns the total number of allocations in this arena.
-    fn len(&self) -> usize {
-        self.arena.lock().unwrap().len()
-    }
-}
+use crate::storage::Storage;
 
 /// A vector-like container optimized for efficient cloning.
 ///
-/// `CowVec` uses a shared arena (via `Arc`) for storing values. Each instance
-/// maintains its own vector of pointers to items in the shared arena.
-/// When cloned, only the pointer vector is cloned while the arena is shared.
+/// `CowVec` stores values in append-only bump arenas shared between clones
+/// (kept alive via `Arc`). Each instance maintains a vector of pointers to
+/// those values; cloning shares both the storage and the pointer vector, so
+/// `clone()` is O(1).
 ///
 /// # Copy-on-Write Semantics
-/// The `set` method implements copy-on-write: it allocates a new value in the
-/// arena and updates only this instance's pointer. Other clones continue to
-/// see the original value.
+/// The `set` method implements copy-on-write: it allocates a new value in
+/// this instance's storage and updates only this instance's pointer. Other
+/// clones continue to see the original value.
 ///
 /// # Thread Safety
-/// `CowVec<T>` is `Send` and `Sync` when `T: Send + Sync`.
+/// `CowVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation is
+/// lock-free: each instance only ever allocates into an arena it uniquely
+/// owns, so clones on different threads never contend.
 ///
 /// # Example
 /// ```
@@ -87,15 +33,17 @@ impl<T> CowArena<T> {
 /// assert_eq!(vec2[0], 10);
 /// ```
 pub struct CowVec<T> {
-    arena: Arc<CowArena<T>>,
+    storage: Storage<T>,
     items: Arc<Vec<*const T>>,
 }
 
-// SAFETY: CowVec is Send+Sync because:
-// - Arc<CowArena<T>> is Send+Sync when T: Send+Sync (CowArena contains Mutex<Arena<T>>)
-// - *const T pointers are valid as long as arena lives (guaranteed by Arc)
-// - All mutation goes through Mutex
-// - We only provide &T access, never &mut T
+// SAFETY: CowVec is Send+Sync when T: Send+Sync because:
+// - Storage<T> allocates lock-free but only ever through the instance that
+//   uniquely owns the active arena, under &mut self (see storage.rs).
+// - The *const T items point into arenas that the storage keeps alive, and
+//   only &T is ever exposed through them (T: Sync); the last owner may drop
+//   the values on any thread (T: Send).
+// The manual impls exist because *const T suppresses the automatic ones.
 unsafe impl<T: Send + Sync> Send for CowVec<T> {}
 unsafe impl<T: Send + Sync> Sync for CowVec<T> {}
 
@@ -112,7 +60,7 @@ impl<T> CowVec<T> {
     /// Creates a new empty `CowVec`.
     pub fn new() -> Self {
         Self {
-            arena: Arc::new(CowArena::new()),
+            storage: Storage::new(),
             items: Arc::new(Vec::new()),
         }
     }
@@ -120,7 +68,7 @@ impl<T> CowVec<T> {
     /// Creates a new `CowVec` with the specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            arena: Arc::new(CowArena::with_capacity(capacity)),
+            storage: Storage::with_capacity(capacity),
             items: Arc::new(Vec::with_capacity(capacity)),
         }
     }
@@ -143,12 +91,26 @@ impl<T> CowVec<T> {
         Arc::strong_count(&self.items) > 1
     }
 
-    /// Returns `true` if the storage (arena with actual values) is shared with other clones.
+    /// Returns `true` if the storage (arenas with actual values) may be
+    /// shared with other clones.
     ///
-    /// This typically returns `true` after any clone operation, as all clones share
-    /// the same arena for value storage.
+    /// This typically returns `true` after any clone operation. It is
+    /// conservative: storage that retains frozen ancestor arenas reports
+    /// `true` even if every other owner has already been dropped.
     pub fn is_storage_shared(&self) -> bool {
-        Arc::strong_count(&self.arena) > 1
+        self.storage.is_shared()
+    }
+
+    /// Returns the number of values this vector's storage keeps alive,
+    /// including values no longer reachable (replaced by `set`, dropped by
+    /// `pop`, and so on).
+    ///
+    /// Useful for deciding when to reclaim memory with
+    /// [`clone_compacted`](Self::clone_compacted). After
+    /// [`append`](Self::append) this is an upper bound, since the two
+    /// vectors may have kept overlapping history alive.
+    pub fn storage_allocations(&self) -> usize {
+        self.storage.allocated()
     }
 
     /// Returns the elements as a slice of references.
@@ -191,7 +153,7 @@ impl<T> CowVec<T> {
     /// The element is stored in the shared arena, and this instance's
     /// pointer list is updated to include it.
     pub fn push(&mut self, value: T) {
-        let ptr = self.arena.alloc(value);
+        let ptr = self.storage.alloc(value);
         self.items_mut().push(ptr);
     }
 
@@ -406,7 +368,7 @@ impl<T> CowVec<T> {
     /// assert_eq!(vec.to_vec(), vec![1, 10, 2, 3]);
     /// ```
     pub fn insert(&mut self, index: usize, value: T) {
-        let ptr = self.arena.alloc(value);
+        let ptr = self.storage.alloc(value);
         self.items_mut().insert(index, ptr);
     }
 
@@ -458,9 +420,31 @@ impl<T> CowVec<T> {
     pub fn split_off(&mut self, at: usize) -> Self {
         let tail_items = self.items_mut().split_off(at);
         Self {
-            arena: Arc::clone(&self.arena),
+            storage: self.storage.clone(),
             items: Arc::new(tail_items),
         }
+    }
+
+    /// Appends all elements of `other` to this vector by copying pointers.
+    ///
+    /// No element is moved or cloned: this vector's storage additionally
+    /// keeps `other`'s arenas alive, and only the 8-byte pointers are
+    /// copied. `other` is unaffected.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut a = CowVec::from(vec![1, 2]);
+    /// let b = CowVec::from(vec![3, 4]);
+    /// a.append(&b);
+    /// assert_eq!(a, vec![1, 2, 3, 4]);
+    /// assert_eq!(b, vec![3, 4]);
+    /// ```
+    pub fn append(&mut self, other: &CowVec<T>) {
+        self.storage.absorb(&other.storage);
+        let other_items: &[*const T] = &other.items;
+        self.items_mut().extend_from_slice(other_items);
     }
 
     /// Removes the specified range and replaces it with elements from the iterator.
@@ -497,7 +481,7 @@ impl<T> CowVec<T> {
         };
 
         // Allocate new elements in arena under a single lock
-        let new_ptrs = self.arena.alloc_extend(replace_with);
+        let new_ptrs = self.storage.alloc_extend(replace_with);
 
         // Splice the pointer vector and clone out the removed values
         self.items_mut()
@@ -534,19 +518,17 @@ impl<T: Clone> CowVec<T> {
     /// `pop`, `remove`, and similar operations, whose old values stay in the
     /// shared arena.
     pub fn clone_compacted(&self, max_allocations: usize) -> Self {
-        if self.arena.len() <= max_allocations {
+        if self.storage.allocated() <= max_allocations {
             return self.clone();
         }
 
-        // Create a fresh arena with just the current elements.
-        let new_arena = Arc::new(CowArena::with_capacity(self.len()));
-        let new_items: Vec<*const T> = self
-            .iter()
-            .map(|item| new_arena.alloc(item.clone()))
-            .collect();
+        // Create fresh storage holding just the current elements,
+        // contiguously.
+        let mut storage = Storage::with_capacity(self.len());
+        let new_items = storage.alloc_extend(self.iter().cloned());
 
         Self {
-            arena: new_arena,
+            storage,
             items: Arc::new(new_items),
         }
     }
@@ -569,7 +551,7 @@ impl<T> CowVec<T> {
                 index
             );
         }
-        let ptr = self.arena.alloc(value);
+        let ptr = self.storage.alloc(value);
         self.items_mut()[index] = ptr;
     }
 
@@ -611,7 +593,7 @@ impl<T> CowVec<T> {
         // Clone the current value to a new arena location (copy-on-write).
         // SAFETY: Same as get() - pointer is valid for arena's lifetime
         let current = unsafe { &*self.items[index] }.clone();
-        let ptr = self.arena.alloc(current);
+        let ptr = self.storage.alloc(current);
         self.items_mut()[index] = ptr;
         // SAFETY: The pointer was just allocated with write provenance and no
         // other CowVec references it. We have exclusive access via &mut self,
@@ -640,7 +622,7 @@ impl<T> Clone for CowVec<T> {
     /// vector deferred until (and only if) a mutation occurs.
     fn clone(&self) -> Self {
         Self {
-            arena: Arc::clone(&self.arena),
+            storage: self.storage.clone(),
             items: Arc::clone(&self.items),
         }
     }
@@ -658,10 +640,10 @@ impl<T> From<Vec<T>> for CowVec<T> {
     /// All elements are allocated under a single arena lock and stored
     /// contiguously.
     fn from(vec: Vec<T>) -> Self {
-        let arena = Arc::new(CowArena::with_capacity(vec.len()));
-        let items = arena.alloc_extend(vec);
+        let mut storage = Storage::with_capacity(vec.len());
+        let items = storage.alloc_extend(vec);
         Self {
-            arena,
+            storage,
             items: Arc::new(items),
         }
     }
@@ -673,7 +655,7 @@ impl<T> Extend<T> for CowVec<T> {
     /// All elements are allocated under a single arena lock and stored
     /// contiguously.
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        let ptrs = self.arena.alloc_extend(iter);
+        let ptrs = self.storage.alloc_extend(iter);
         self.items_mut().extend(ptrs);
     }
 }
@@ -684,10 +666,10 @@ impl<T> FromIterator<T> for CowVec<T> {
     /// All elements are allocated under a single arena lock and stored
     /// contiguously.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let arena = Arc::new(CowArena::new());
-        let items = arena.alloc_extend(iter);
+        let mut storage = Storage::new();
+        let items = storage.alloc_extend(iter);
         Self {
-            arena,
+            storage,
             items: Arc::new(items),
         }
     }

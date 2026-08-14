@@ -1236,3 +1236,100 @@ fn test_binary_search() {
     assert_eq!(vec.binary_search(&5), Err(0));
     assert_eq!(vec.binary_search(&50), Err(4));
 }
+
+#[test]
+fn test_append_copies_pointers_not_elements() {
+    let mut a = CowVec::from(vec!["x".to_string(), "y".to_string()]);
+    let b = CowVec::from(vec!["z".to_string()]);
+    a.append(&b);
+    assert_eq!(a.len(), 3);
+    assert_eq!(a[2], "z");
+    // b is untouched and its element is literally the same allocation.
+    assert_eq!(b.len(), 1);
+    assert!(std::ptr::eq(&a[2] as *const String, &b[0] as *const String));
+}
+
+#[test]
+fn test_append_then_drop_source_keeps_values_alive() {
+    let mut a = CowVec::from(vec![1]);
+    {
+        let b = CowVec::from(vec![2, 3]);
+        a.append(&b);
+    } // b dropped here
+    assert_eq!(a, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_append_self_clone() {
+    let mut a = CowVec::from(vec![1, 2]);
+    let c = a.clone();
+    a.append(&c);
+    assert_eq!(a, vec![1, 2, 1, 2]);
+    assert_eq!(c, vec![1, 2]);
+}
+
+#[test]
+fn test_deep_version_chain_drops_iteratively() {
+    // Every set() under sharing freezes the active arena and grows the
+    // keep-alive chain by one node. A recursive drop would overflow the
+    // stack at this depth.
+    let n = if cfg!(miri) { 200 } else { 200_000 };
+    let mut keep = Vec::new();
+    let mut v = CowVec::from(vec![0usize]);
+    for i in 0..n {
+        keep.push(v.clone());
+        v.set(0, i);
+    }
+    assert_eq!(v[0], n - 1);
+    drop(keep);
+    drop(v); // must not overflow the stack
+}
+
+#[test]
+fn test_concurrent_divergence_no_contention() {
+    let base = CowVec::from((0..100).collect::<Vec<i32>>());
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            let mut branch = base.clone();
+            thread::spawn(move || {
+                for i in 0..50 {
+                    branch.set(i, t * 1000 + i as i32);
+                    branch.push(i as i32);
+                }
+                (branch[0], branch.len())
+            })
+        })
+        .collect();
+    for (t, handle) in handles.into_iter().enumerate() {
+        let (first, len) = handle.join().unwrap();
+        assert_eq!(first, t as i32 * 1000);
+        assert_eq!(len, 150);
+    }
+    // Base is untouched.
+    assert_eq!(base[0], 0);
+    assert_eq!(base.len(), 100);
+}
+
+#[test]
+fn test_storage_allocations_counts_garbage() {
+    let mut v = CowVec::from(vec![1, 2, 3]);
+    assert_eq!(v.storage_allocations(), 3);
+    for i in 0..10 {
+        v.set(0, i);
+    }
+    assert_eq!(v.storage_allocations(), 13);
+    let compacted = v.clone_compacted(5);
+    assert_eq!(compacted.storage_allocations(), 3);
+    assert_eq!(compacted, vec![9, 2, 3]);
+}
+
+#[test]
+fn test_values_outlive_original_after_clone_drop() {
+    let v2;
+    {
+        let v1 = CowVec::from(vec![String::from("alpha"), String::from("beta")]);
+        v2 = v1.clone();
+    } // v1 dropped; storage kept alive by v2
+    assert_eq!(v2[0], "alpha");
+    assert_eq!(v2[1], "beta");
+}
