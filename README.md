@@ -1,10 +1,10 @@
 # cow_vec
 
-Vectors optimized for O(1) clone. When a clone diverges, you copy pointers —
-never elements.
+Clone a vector in constant time. When that clone starts writing, you copy
+pointers — never the elements themselves.
 
-The crate provides two containers with identical semantics and different
-divergence/access trade-offs:
+You get two types that behave the same from the outside and disagree about
+what happens the first time a clone writes:
 
 | | `CowVec<T>` | `PagedVec<T>` |
 |---|---|---|
@@ -16,9 +16,10 @@ divergence/access trade-offs:
 | `pop` / `truncate` after clone | copies pointer array once | copies nothing |
 | Extras | `sort`/`dedup`/`binary_search`, `append`, `split_off`, `splice`, `as_slice` | core API |
 
-Rule of thumb: **`CowVec`** when clones diverge rarely or all at once and reads
-dominate; **`PagedVec`** when you keep deriving new versions from old ones —
-version chains, undo history, branch-and-discard search.
+**CowVec** is the one you want when clones rarely write — or they rewrite
+everything at once — and most of the time you are just reading. **PagedVec**
+is for the other life: you keep deriving new versions from old ones.
+Version chains, undo history, branch-and-discard search.
 
 ## Quick start
 
@@ -31,11 +32,10 @@ let base = CowVec::from(vec![
     String::from("gamma"),
 ]);
 
-// O(1): shares storage and structure with `base`.
+// Instant. Shares storage and structure with `base`.
 let mut branch = base.clone();
 
-// Copy-on-write: only `branch` sees the change. The Strings in `base`
-// are never cloned.
+// Only `branch` sees this. The Strings in `base` are never cloned.
 branch.set(1, String::from("BETA"));
 branch.make_mut(2).push_str("!");
 
@@ -43,16 +43,17 @@ assert_eq!(base.to_vec(), ["alpha", "beta", "gamma"]);
 assert_eq!(branch.to_vec(), ["alpha", "BETA", "gamma!"]);
 ```
 
-`PagedVec` has the same API; it earns its keep when versions chain:
+`PagedVec` has the same API. It starts earning its keep once versions
+chain:
 
 ```rust
 use cow_vec::PagedVec;
 
 let mut versions: Vec<PagedVec<u64>> = vec![(0..100_000).collect()];
 
-// Each generation: clone the last version, replace a few elements.
-// Cost per generation: the root table plus one 8 KB page per touched
-// page - not the whole vector.
+// Each generation: clone the last version, poke a couple of elements.
+// You pay for the root table plus one 8 KB page per page you touch —
+// not the whole vector.
 for gen in 1..10 {
     let mut next = versions.last().unwrap().clone();
     next.set(50_000, gen);
@@ -60,12 +61,12 @@ for gen in 1..10 {
     versions.push(next);
 }
 
-assert_eq!(versions[0][50_000], 50_000); // every version intact
+assert_eq!(versions[0][50_000], 50_000); // every version is still intact
 assert_eq!(versions[9][50_000], 9);
 ```
 
-Cheap permutation is a side effect of the pointer representation: sorting a
-`CowVec` of megabyte-sized structs moves 8-byte pointers, never the structs.
+A nice side effect of the pointer representation: sorting a `CowVec` of
+megabyte-sized structs shuffles 8-byte pointers. The structs stay put.
 
 ```rust
 use cow_vec::CowVec;
@@ -79,20 +80,20 @@ vec.sort_by(|a, b| a.cmp(b)); // permutes pointers only
 assert_eq!(vec.to_vec(), ["apple", "pear", "plum"]);
 ```
 
-Concatenation copies pointers, not elements:
+Concatenation is the same story — pointers move, elements don't:
 
 ```rust
 use cow_vec::CowVec;
 
 let mut a = CowVec::from(vec![1, 2]);
 let b = CowVec::from(vec![3, 4]);
-a.append(&b); // b's storage is kept alive; nothing is cloned
+a.append(&b); // b's storage stays alive; nothing is cloned
 assert_eq!(a, vec![1, 2, 3, 4]);
 ```
 
 ## Choosing a container (including someone else's)
 
-The honest comparison set, for a vector you clone often and mutate a little:
+You clone a lot and mutate a little. Here is the honest lineup:
 
 | | clone | diverge k of n elements | access | reclaims memory | unsafe-free |
 |---|---|---|---|---|---|
@@ -103,18 +104,18 @@ The honest comparison set, for a vector you clone often and mutate a little:
 | `CowVec<T>` | O(1) | n pointer memcpy, once | 1 deref | via compaction | no |
 | `PagedVec<T>` | O(1) | root + touched pages | 2 derefs | via compaction | no |
 
-- If `T` is cheap to clone (numbers, small structs), use **`Arc<Vec<T>>`** and
-  stop reading — element clones are the whole cost this crate avoids, and
-  yours are free.
-- If you need automatic reclamation and heavy editing across many versions,
-  **`imbl`** is excellent; its trade is tree-depth access.
+- If `T` is cheap to clone — numbers, small structs — use **`Arc<Vec<T>>`**
+  and stop reading. Element clones are the cost this crate exists to avoid,
+  and yours are free.
+- If you want automatic reclamation and you edit heavily across many
+  versions, **`imbl`** is excellent. The trade is tree-depth access.
 - This crate's niche is **expensive-to-clone elements + snapshot-style
-  workloads + flat, predictable access latency**. Divergence costs pointer
-  copies; access stays fixed-depth.
+  work + flat, predictable access**. Divergence costs pointer copies.
+  Access stays a fixed number of loads.
 
 ## How it works
 
-Both containers separate *structure* from *storage*:
+Both types split *structure* from *storage*:
 
 ```text
 CowVec                                PagedVec
@@ -127,16 +128,18 @@ items: Arc<Vec<*const T>>             pages: Arc<Vec<Arc<Page>>>
        +-----------------------------------------------------+
 ```
 
-**Structure** is the pointer table, shared via `Arc` and copied on first
-write (`Arc::make_mut`). `CowVec` copies it wholesale; `PagedVec` copies the
-root table and individual 8 KB pages.
+**Structure** is the pointer table. It is shared through `Arc` and copied
+on first write (`Arc::make_mut`). `CowVec` copies the whole thing;
+`PagedVec` copies the root table and whichever 8 KB pages you actually
+touch.
 
-**Storage** is append-only bump arenas. Each instance allocates only into an
-arena it *uniquely owns* — the first allocation after a clone freezes the
-now-shared arena onto an `Arc` keep-alive chain and starts a fresh one. That
-makes every `push`/`set` lock-free: clones on different threads never
-contend. Values never move, so the raw pointers in the structure stay valid
-for as long as any descendant holds the chain.
+**Storage** is append-only bump arenas. An instance only allocates into an
+arena it *uniquely owns*. The first allocation after a clone freezes the
+now-shared arena onto an `Arc` keep-alive chain and starts a fresh one.
+That is why every `push`/`set` is lock-free: clones on different threads
+never fight over the same arena. Values never move, so the raw pointers in
+the structure stay valid as long as any descendant is still holding the
+chain.
 
 ## Performance characteristics
 
@@ -154,11 +157,11 @@ for as long as any descendant holds the chain.
 
 ### Benchmarks
 
-Median criterion times on an Apple M1 Pro. Elements are structs carrying a
-`String`, so element clones cost real heap allocations — the regime these
-containers target. "50 edits" replaces 50 scattered elements after a clone;
-"chained" derives 32 such generations from each other, keeping every
-version.
+Median criterion times on an Apple M1 Pro. Elements are structs that own a
+`String`, so cloning one actually allocates — the world these containers
+are built for. "50 edits" replaces 50 scattered elements after a clone.
+"chained" derives 32 such generations from each other and keeps every
+version around.
 
 | Scenario | `Vec` | `Arc<Vec>` | `Arc<Vec<Arc>>` | `imbl` | `CowVec` | `PagedVec` |
 |---|---|---|---|---|---|---|
@@ -172,28 +175,29 @@ version.
 
 ¹ measured as `Vec<Arc<T>>` (the read path is identical).
 
-What the numbers say:
+What the numbers actually mean:
 
-- **Divergence is where this crate lives.** Producing a 50-edit version of a
-  1M-element vector: `PagedVec` 23 µs vs `imbl` 69 µs vs `CowVec` 171 µs vs
-  the idiomatic `Arc<Vec<Arc<T>>>` at 2.6 ms — and `Arc<Vec<T>>` pays the
-  full 14 ms element-clone bill that O(1)-clone types exist to avoid.
-- **Access stays flat.** Random reads through `CowVec`/`PagedVec` cost the
-  same as through a plain `Vec<Arc<T>>` (one pointer chase) and ~22× less
-  than `imbl`'s tree walk. Iteration lands within ~10–30% of plain `Vec`.
-- **The chained-generations workload** — the reason `PagedVec` exists —
-  runs 7.5× faster than `CowVec` (which re-copies the full pointer table
-  every generation) and 2.5× faster than `imbl`.
+- **Divergence is where this crate lives.** A 50-edit version of a
+  1M-element vector: `PagedVec` 23 µs, `imbl` 69 µs, `CowVec` 171 µs, and
+  the usual `Arc<Vec<Arc<T>>>` at 2.6 ms. `Arc<Vec<T>>` just pays the full
+  14 ms element-clone bill — the one O(1)-clone types exist to spare you.
+- **Access stays flat.** Random reads through `CowVec`/`PagedVec` cost
+  about the same as through a plain `Vec<Arc<T>>` (one pointer chase) and
+  ~22× less than walking `imbl`'s tree. Iteration lands within ~10–30% of
+  a plain `Vec`.
+- **Chained generations** are why `PagedVec` exists. That workload runs
+  7.5× faster than `CowVec` (which recopies the whole pointer table every
+  generation) and 2.5× faster than `imbl`.
 
-Reproduce with `cargo bench`. Numbers move with hardware; the *ratios* are
-the point.
+Reproduce with `cargo bench`. Hardware moves the numbers; the *ratios*
+are the point.
 
 ## Memory model and compaction
 
-Storage is append-only: `set`, `pop`, `remove`, and `clear` leave old values
-allocated, because other clones may still reference them and the arenas give
-out stable pointers. A long-lived, frequently mutated vector therefore
-accumulates garbage. Two tools manage it:
+Storage is append-only. `set`, `pop`, `remove`, and `clear` leave the old
+values sitting there, because some other clone might still be pointing at
+them, and the arenas hand out pointers that cannot move. A long-lived
+vector you keep mutating therefore collects garbage. Two tools for that:
 
 ```rust
 use cow_vec::CowVec;
@@ -204,42 +208,44 @@ for i in 0..100 {
 }
 assert_eq!(vec.storage_allocations(), 103); // 3 live + 100 garbage
 
-// Rebuild into fresh, contiguous storage once past a threshold:
+// Rebuild into fresh, contiguous storage once you are past a threshold:
 let compacted = vec.clone_compacted(50);
 assert_eq!(compacted.storage_allocations(), 3);
 assert_eq!(compacted, vec);
 ```
 
-Dropping every clone of a lineage frees all of its arenas; keep-alive chains
-drop iteratively, so version chains hundreds of thousands of generations
-deep unwind without recursion.
+Drop every clone of a lineage and all of its arenas go with it. Keep-alive
+chains drop iteratively, so a version chain hundreds of thousands of
+generations deep unwinds without blowing the stack.
 
 ## Limitations
 
-- **No `&mut T` without cost**: `make_mut` clones the value to a fresh slot
-  every call. There is no in-place mutation that other clones could observe.
-- **`pop`/`remove`/`splice` need `T: Clone`** to return owned values (the
-  original must stay in storage for other clones). `truncate` works for any
-  `T`.
-- **Garbage until compaction**, as described above. Poor fit for long-lived
-  collections with unbounded mutation and no compaction points.
-- **Small cheap elements**: the pointer indirection and per-element
-  allocation are pure overhead — use `Vec` or `Arc<Vec<T>>`.
-- `PagedVec` currently offers the core API only (no `insert`/`remove`/
+- **No free `&mut T`.** `make_mut` clones the value into a fresh slot
+  every time. There is no in-place mutation that other clones could see —
+  that is the point.
+- **`pop`/`remove`/`splice` need `T: Clone`** so they can hand you an
+  owned value (the original has to stay in storage for everyone else).
+  `truncate` works for any `T`.
+- **Garbage until you compact**, as above. A poor fit for a long-lived
+  collection that mutates forever and never gets a compaction point.
+- **Small cheap elements** do not belong here. The pointer hop and
+  per-element allocation are pure overhead — use `Vec` or `Arc<Vec<T>>`.
+- `PagedVec` currently has the core API only (no `insert`/`remove`/
   `sort`/`splice`).
 
 ## Safety and testing
 
-The crate is built on raw pointers into append-only arenas, so it treats
-verification as a feature:
+This crate is raw pointers into append-only arenas, so verification is
+part of the product:
 
-- The **entire test suite runs under Miri** (Stacked Borrows) in CI — the
-  concurrency tests included. Pointer provenance is preserved through every
-  allocation path.
-- Both containers pass one **shared behavior suite** (the parity contract),
-  `PagedVec` at page sizes 1024 and 8 so page-boundary logic is hammered.
-- Page-granularity tests assert *which* pages diverge on mutation, not just
-  that values end up correct.
+- The **entire test suite runs under Miri** (Stacked Borrows) in CI —
+  concurrency tests included. Pointer provenance is preserved through
+  every allocation path.
+- Both types share one **behavior suite** (the parity contract).
+  `PagedVec` runs it at page sizes 1024 and 8, so page-boundary logic is
+  hammered.
+- Page-granularity tests check *which* pages diverge on a mutation, not
+  just that the values come out right.
 
 ## Migration from 1.x
 
@@ -253,9 +259,9 @@ verification as a feature:
 | `vec.position(p)` | `vec.iter().position(p)` |
 | `vec.clone_with_max_capacity(n)` | `vec.clone_compacted(n)` |
 
-1.x also had a soundness bug in `IndexMut` (a write through a pointer that
-had lost write provenance — undefined behavior, found by Miri). 2.0 fixes
-the provenance handling everywhere and removes the footgun API.
+1.x also had a soundness bug in `IndexMut`: a write through a pointer that
+had lost write provenance — undefined behavior, found by Miri. 2.0 fixes
+the provenance handling everywhere and takes the footgun API out.
 
 ## License
 
