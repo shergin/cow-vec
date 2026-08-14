@@ -2,6 +2,7 @@
 name = "cow_vec"
 version = "1.4.0"
 edition = "2021"
+rust-version = "1.75"
 authors = ["Valentin Shergin"]
 description = "A vector-like container optimized for efficient cloning with copy-on-write semantics"
 license = "MIT"
