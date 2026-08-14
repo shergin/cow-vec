@@ -1087,3 +1087,79 @@ fn test_iter_count_and_last() {
     assert_eq!(vec.iter().count(), 3);
     assert_eq!(vec.iter().last(), Some(&9));
 }
+
+#[test]
+fn test_eq_by_elements() {
+    let a = CowVec::from(vec![1, 2, 3]);
+    let b = CowVec::from(vec![1, 2, 3]);
+    let c = CowVec::from(vec![1, 2, 4]);
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert_ne!(a, CowVec::from(vec![1, 2]));
+}
+
+#[test]
+fn test_eq_shared_structure_fast_path() {
+    let a = CowVec::from(vec![1, 2, 3]);
+    let b = a.clone();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn test_eq_against_vec_and_slice() {
+    let a = CowVec::from(vec![1, 2, 3]);
+    assert_eq!(a, vec![1, 2, 3]);
+    assert_eq!(a, *[1, 2, 3].as_slice());
+    assert_ne!(a, vec![1, 2]);
+}
+
+#[test]
+fn test_ord_lexicographic() {
+    let a = CowVec::from(vec![1, 2]);
+    let b = CowVec::from(vec![1, 3]);
+    let c = CowVec::from(vec![1, 2, 0]);
+    assert!(a < b);
+    assert!(a < c);
+    assert!(b > c);
+}
+
+#[test]
+fn test_hash_consistent_with_eq() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn hash_of<T: Hash>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let a = CowVec::from(vec![1, 2, 3]);
+    let mut b = a.clone();
+    b.set(0, 1); // same value, different arena slot
+    assert_eq!(hash_of(&a), hash_of(&b));
+}
+
+#[test]
+fn test_from_iterator_collect() {
+    let vec: CowVec<i32> = (1..=5).collect();
+    assert_eq!(vec, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_from_slice() {
+    let source = [String::from("a"), String::from("b")];
+    let vec = CowVec::from(source.as_slice());
+    assert_eq!(vec.len(), 2);
+    assert_eq!(vec[0], "a");
+}
+
+#[test]
+fn test_extend_trait_from_generic_code() {
+    fn fill<E: Extend<i32>>(target: &mut E) {
+        target.extend([1, 2, 3]);
+    }
+    let mut vec = CowVec::new();
+    fill(&mut vec);
+    assert_eq!(vec, vec![1, 2, 3]);
+}

@@ -276,15 +276,6 @@ impl<T> CowVec<T> {
         self.items_mut().clear();
     }
 
-    /// Extends the vector with elements from an iterator.
-    ///
-    /// All elements are allocated under a single arena lock and stored
-    /// contiguously.
-    pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        let ptrs = self.arena.alloc_extend(iter);
-        self.items_mut().extend(ptrs);
-    }
-
     /// Returns the index of the first element matching the predicate.
     pub fn position<P>(&self, predicate: P) -> Option<usize>
     where
@@ -518,6 +509,89 @@ impl<T> From<Vec<T>> for CowVec<T> {
         Self {
             arena,
             items: Arc::new(items),
+        }
+    }
+}
+
+impl<T> Extend<T> for CowVec<T> {
+    /// Extends the vector with elements from an iterator.
+    ///
+    /// All elements are allocated under a single arena lock and stored
+    /// contiguously.
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let ptrs = self.arena.alloc_extend(iter);
+        self.items_mut().extend(ptrs);
+    }
+}
+
+impl<T> FromIterator<T> for CowVec<T> {
+    /// Creates a `CowVec` from an iterator.
+    ///
+    /// All elements are allocated under a single arena lock and stored
+    /// contiguously.
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let arena = Arc::new(CowArena::new());
+        let items = arena.alloc_extend(iter);
+        Self {
+            arena,
+            items: Arc::new(items),
+        }
+    }
+}
+
+impl<T: Clone> From<&[T]> for CowVec<T> {
+    /// Creates a `CowVec` by cloning the elements of a slice.
+    fn from(slice: &[T]) -> Self {
+        slice.iter().cloned().collect()
+    }
+}
+
+impl<T: PartialEq> PartialEq for CowVec<T> {
+    /// Compares two vectors element by element.
+    ///
+    /// Vectors that share their structure (e.g. un-diverged clones) compare
+    /// equal in O(1) without touching any elements.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.items, &other.items)
+            || (self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a == b))
+    }
+}
+
+impl<T: Eq> Eq for CowVec<T> {}
+
+impl<T: PartialEq> PartialEq<[T]> for CowVec<T> {
+    fn eq(&self, other: &[T]) -> bool {
+        self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a == b)
+    }
+}
+
+impl<T: PartialEq> PartialEq<Vec<T>> for CowVec<T> {
+    fn eq(&self, other: &Vec<T>) -> bool {
+        self == other.as_slice()
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for CowVec<T> {
+    /// Lexicographic comparison, like `Vec`.
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+impl<T: Ord> Ord for CowVec<T> {
+    /// Lexicographic comparison, like `Vec`.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl<T: std::hash::Hash> std::hash::Hash for CowVec<T> {
+    /// Hashes the length followed by each element, so equal vectors hash
+    /// identically regardless of how their storage is shared.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for item in self {
+            item.hash(state);
         }
     }
 }
