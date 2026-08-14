@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use super::CowVec;
+use crate::CowVec;
 
 #[test]
 fn test_new_creates_empty_vec() {
@@ -1333,3 +1333,6 @@ fn test_values_outlive_original_after_clone_drop() {
     assert_eq!(v2[0], "alpha");
     assert_eq!(v2[1], "beta");
 }
+
+// The behavior contract every vector type in this crate must satisfy.
+super::shared_suite::shared_vec_tests!(shared_behavior, CowVec);

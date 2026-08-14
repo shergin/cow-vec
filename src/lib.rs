@@ -10,5 +10,9 @@ pub use cow_vec::CowVec;
 pub use iterator::CowVecIter;
 
 #[cfg(test)]
-#[path = "tests/cow_vec_tests.rs"]
-mod tests;
+#[path = "tests"]
+mod tests {
+    mod shared_suite;
+
+    mod cow_vec_tests;
+}
