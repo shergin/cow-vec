@@ -42,6 +42,20 @@ impl<T> CowArena<T> {
         reference as *mut T as *const T
     }
 
+    /// Allocates every value from the iterator under a single lock and
+    /// returns their pointers.
+    ///
+    /// The values are placed contiguously in the arena, so bulk-loaded
+    /// elements are adjacent in memory.
+    ///
+    /// # Safety
+    /// Same guarantees as [`alloc`](Self::alloc).
+    fn alloc_extend<I: IntoIterator<Item = T>>(&self, iter: I) -> Vec<*const T> {
+        let arena = self.arena.lock().unwrap();
+        let slice = arena.alloc_extend(iter);
+        slice.iter_mut().map(|r| r as *mut T as *const T).collect()
+    }
+
     /// Returns the total number of allocations in this arena.
     fn len(&self) -> usize {
         self.arena.lock().unwrap().len()
@@ -260,10 +274,12 @@ impl<T> CowVec<T> {
     }
 
     /// Extends the vector with elements from an iterator.
+    ///
+    /// All elements are allocated under a single arena lock and stored
+    /// contiguously.
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        for item in iter {
-            self.push(item);
-        }
+        let ptrs = self.arena.alloc_extend(iter);
+        self.items_mut().extend(ptrs);
     }
 
     /// Returns the index of the first element matching the predicate.
@@ -377,11 +393,8 @@ impl<T> CowVec<T> {
             Bound::Unbounded => self.len(),
         };
 
-        // Allocate new elements in arena
-        let new_ptrs: Vec<*const T> = replace_with
-            .into_iter()
-            .map(|item| self.arena.alloc(item))
-            .collect();
+        // Allocate new elements in arena under a single lock
+        let new_ptrs = self.arena.alloc_extend(replace_with);
 
         // Splice the pointer vector and collect removed pointers
         let removed_ptrs: Vec<*const T> = self.items_mut().splice(start..end, new_ptrs).collect();
@@ -493,9 +506,12 @@ impl<T: fmt::Debug> fmt::Debug for CowVec<T> {
 
 impl<T> From<Vec<T>> for CowVec<T> {
     /// Creates a `CowVec` from a `Vec`.
+    ///
+    /// All elements are allocated under a single arena lock and stored
+    /// contiguously.
     fn from(vec: Vec<T>) -> Self {
         let arena = Arc::new(CowArena::with_capacity(vec.len()));
-        let items: Vec<*const T> = vec.into_iter().map(|item| arena.alloc(item)).collect();
+        let items = arena.alloc_extend(vec);
         Self {
             arena,
             items: Arc::new(items),
