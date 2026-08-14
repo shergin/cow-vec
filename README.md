@@ -1,5 +1,9 @@
 # cow_vec
 
+[![CI](https://github.com/shergin/cow-vec/actions/workflows/ci.yml/badge.svg)](https://github.com/shergin/cow-vec/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/cow_vec.svg)](https://crates.io/crates/cow_vec)
+[![docs.rs](https://img.shields.io/docsrs/cow_vec)](https://docs.rs/cow_vec)
+
 Clone a vector in constant time. When that clone starts writing, you copy
 pointers — never the elements themselves.
 
