@@ -1163,3 +1163,76 @@ fn test_extend_trait_from_generic_code() {
     fill(&mut vec);
     assert_eq!(vec, vec![1, 2, 3]);
 }
+
+#[test]
+fn test_sort_permutes_pointers_only() {
+    let mut vec = CowVec::from(vec![3, 1, 4, 1, 5, 9, 2, 6]);
+    vec.sort();
+    assert_eq!(vec, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+}
+
+#[test]
+fn test_sort_does_not_affect_clones() {
+    let vec1 = CowVec::from(vec![3, 1, 2]);
+    let mut vec2 = vec1.clone();
+    vec2.sort();
+    assert_eq!(vec1, vec![3, 1, 2]);
+    assert_eq!(vec2, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_sort_by_and_unstable() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4]);
+    vec.sort_by(|a, b| b.cmp(a));
+    assert_eq!(vec, vec![4, 3, 2, 1]);
+    vec.sort_unstable();
+    assert_eq!(vec, vec![1, 2, 3, 4]);
+    vec.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(vec, vec![4, 3, 2, 1]);
+}
+
+#[test]
+fn test_sort_by_key() {
+    let mut vec = CowVec::from(vec!["hello", "hi", "hey"]);
+    vec.sort_by_key(|s| s.len());
+    assert_eq!(vec, vec!["hi", "hey", "hello"]);
+}
+
+#[test]
+fn test_sort_is_stable() {
+    let mut vec = CowVec::from(vec![(1, 'b'), (0, 'a'), (1, 'a'), (0, 'b')]);
+    vec.sort_by_key(|&(n, _)| n);
+    assert_eq!(vec, vec![(0, 'a'), (0, 'b'), (1, 'b'), (1, 'a')]);
+}
+
+#[test]
+fn test_rotate() {
+    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    vec.rotate_left(2);
+    assert_eq!(vec, vec![3, 4, 5, 1, 2]);
+    vec.rotate_right(2);
+    assert_eq!(vec, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_dedup() {
+    let mut vec = CowVec::from(vec![1, 1, 2, 2, 2, 3, 1]);
+    vec.dedup();
+    assert_eq!(vec, vec![1, 2, 3, 1]);
+}
+
+#[test]
+fn test_dedup_by() {
+    let mut vec = CowVec::from(vec!["foo", "FOO", "bar"]);
+    vec.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    assert_eq!(vec, vec!["foo", "bar"]);
+}
+
+#[test]
+fn test_binary_search() {
+    let vec = CowVec::from(vec![10, 20, 30, 40]);
+    assert_eq!(vec.binary_search(&30), Ok(2));
+    assert_eq!(vec.binary_search(&25), Err(2));
+    assert_eq!(vec.binary_search(&5), Err(0));
+    assert_eq!(vec.binary_search(&50), Err(4));
+}

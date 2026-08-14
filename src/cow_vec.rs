@@ -266,6 +266,115 @@ impl<T> CowVec<T> {
         self.items_mut().reverse();
     }
 
+    /// Sorts the vector with a comparator function (stable).
+    ///
+    /// Only the internal pointers are permuted; elements are never moved or
+    /// cloned, which makes sorting cheap even for large element types.
+    pub fn sort_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&T, &T) -> std::cmp::Ordering,
+    {
+        // SAFETY: Pointers are valid for the arena's lifetime (see get()).
+        self.items_mut()
+            .sort_by(|a, b| compare(unsafe { &**a }, unsafe { &**b }));
+    }
+
+    /// Sorts the vector (stable). See [`sort_by`](Self::sort_by).
+    pub fn sort(&mut self)
+    where
+        T: Ord,
+    {
+        self.sort_by(T::cmp);
+    }
+
+    /// Sorts the vector with a key extraction function (stable).
+    /// See [`sort_by`](Self::sort_by).
+    pub fn sort_by_key<K, F>(&mut self, mut key: F)
+    where
+        K: Ord,
+        F: FnMut(&T) -> K,
+    {
+        // SAFETY: Pointers are valid for the arena's lifetime (see get()).
+        self.items_mut().sort_by_key(|ptr| key(unsafe { &**ptr }));
+    }
+
+    /// Sorts the vector with a comparator function (unstable, typically
+    /// faster). Only pointers are permuted; see [`sort_by`](Self::sort_by).
+    pub fn sort_unstable_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&T, &T) -> std::cmp::Ordering,
+    {
+        // SAFETY: Pointers are valid for the arena's lifetime (see get()).
+        self.items_mut()
+            .sort_unstable_by(|a, b| compare(unsafe { &**a }, unsafe { &**b }));
+    }
+
+    /// Sorts the vector (unstable, typically faster).
+    /// See [`sort_by`](Self::sort_by).
+    pub fn sort_unstable(&mut self)
+    where
+        T: Ord,
+    {
+        self.sort_unstable_by(T::cmp);
+    }
+
+    /// Rotates the vector so that the element at `mid` becomes the first.
+    ///
+    /// # Panics
+    /// Panics if `mid > len()`.
+    pub fn rotate_left(&mut self, mid: usize) {
+        self.items_mut().rotate_left(mid);
+    }
+
+    /// Rotates the vector so that the element at `len() - k` becomes the
+    /// first.
+    ///
+    /// # Panics
+    /// Panics if `k > len()`.
+    pub fn rotate_right(&mut self, k: usize) {
+        self.items_mut().rotate_right(k);
+    }
+
+    /// Removes consecutive elements for which `same_bucket` returns `true`,
+    /// keeping the first of each run.
+    ///
+    /// Note: Removed values remain in the shared arena.
+    pub fn dedup_by<F>(&mut self, mut same_bucket: F)
+    where
+        F: FnMut(&T, &T) -> bool,
+    {
+        // SAFETY: Pointers are valid for the arena's lifetime (see get()).
+        self.items_mut()
+            .dedup_by(|a, b| same_bucket(unsafe { &**a }, unsafe { &**b }));
+    }
+
+    /// Removes consecutive equal elements. See [`dedup_by`](Self::dedup_by).
+    pub fn dedup(&mut self)
+    where
+        T: PartialEq,
+    {
+        self.dedup_by(T::eq);
+    }
+
+    /// Binary searches this vector with a comparator function.
+    ///
+    /// The vector must be sorted consistently with the comparator.
+    pub fn binary_search_by<F>(&self, mut f: F) -> Result<usize, usize>
+    where
+        F: FnMut(&T) -> std::cmp::Ordering,
+    {
+        // SAFETY: Pointers are valid for the arena's lifetime (see get()).
+        self.items.binary_search_by(|ptr| f(unsafe { &**ptr }))
+    }
+
+    /// Binary searches this sorted vector for the given value.
+    pub fn binary_search(&self, value: &T) -> Result<usize, usize>
+    where
+        T: Ord,
+    {
+        self.binary_search_by(|item| item.cmp(value))
+    }
+
     /// Shortens the vector, keeping the first `len` elements.
     ///
     /// If `len` is greater than or equal to the current length, this has no effect.
