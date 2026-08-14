@@ -1,5 +1,5 @@
 use std::fmt;
-use std::ops::{Bound, Index, IndexMut, RangeBounds};
+use std::ops::{Bound, Index, RangeBounds};
 use std::sync::{Arc, Mutex};
 
 use typed_arena::Arena;
@@ -36,7 +36,7 @@ impl<T> CowArena<T> {
     fn alloc(&self, value: T) -> *const T {
         let arena = self.arena.lock().unwrap();
         let reference = arena.alloc(value);
-        // Cast through *mut so the pointer keeps write provenance; IndexMut
+        // Cast through *mut so the pointer keeps write provenance; make_mut
         // writes through it after casting back. A direct `&mut T as *const T`
         // reborrows as shared and makes that write undefined behavior.
         reference as *mut T as *const T
@@ -222,12 +222,16 @@ impl<T> CowVec<T> {
 
     /// Removes the last element and returns it, or `None` if empty.
     ///
-    /// Note: The value remains in the shared arena but is no longer
-    /// accessible through this `CowVec` instance.
-    pub fn pop(&mut self) -> Option<&T> {
+    /// The returned value is cloned out of the shared arena, where the
+    /// original stays allocated (other clones may still reference it).
+    /// To drop elements without `T: Clone`, use [`truncate`](Self::truncate).
+    pub fn pop(&mut self) -> Option<T>
+    where
+        T: Clone,
+    {
         self.items_mut().pop().map(|ptr| {
             // SAFETY: Same as get() - pointer is valid for arena's lifetime
-            unsafe { &*ptr }
+            unsafe { &*ptr }.clone()
         })
     }
 
@@ -235,15 +239,18 @@ impl<T> CowVec<T> {
     ///
     /// All elements after the index are shifted left.
     ///
-    /// Note: The value remains in the shared arena but is no longer
-    /// accessible through this `CowVec` instance.
+    /// The returned value is cloned out of the shared arena, where the
+    /// original stays allocated (other clones may still reference it).
     ///
     /// # Panics
     /// Panics if `index >= len()`.
-    pub fn remove(&mut self, index: usize) -> &T {
+    pub fn remove(&mut self, index: usize) -> T
+    where
+        T: Clone,
+    {
         let ptr = self.items_mut().remove(index);
         // SAFETY: Same as get() - pointer is valid for arena's lifetime
-        unsafe { &*ptr }
+        unsafe { &*ptr }.clone()
     }
 
     /// Swaps two elements in the vector.
@@ -274,14 +281,6 @@ impl<T> CowVec<T> {
     /// accessible through this `CowVec` instance.
     pub fn clear(&mut self) {
         self.items_mut().clear();
-    }
-
-    /// Returns the index of the first element matching the predicate.
-    pub fn position<P>(&self, predicate: P) -> Option<usize>
-    where
-        P: FnMut(&T) -> bool,
-    {
-        self.iter().position(predicate)
     }
 
     /// Inserts an element at position `index`, shifting all elements after it to the right.
@@ -357,7 +356,7 @@ impl<T> CowVec<T> {
 
     /// Removes the specified range and replaces it with elements from the iterator.
     ///
-    /// Returns the removed elements as a `Vec` of references.
+    /// Returns the removed elements, cloned out of the shared arena.
     ///
     /// # Panics
     /// Panics if the range is out of bounds.
@@ -367,12 +366,13 @@ impl<T> CowVec<T> {
     /// use cow_vec::CowVec;
     ///
     /// let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    /// let removed: Vec<&i32> = vec.splice(1..3, vec![10, 20, 30]);
-    /// assert_eq!(removed, vec![&2, &3]);
+    /// let removed: Vec<i32> = vec.splice(1..3, vec![10, 20, 30]);
+    /// assert_eq!(removed, vec![2, 3]);
     /// assert_eq!(vec.to_vec(), vec![1, 10, 20, 30, 4, 5]);
     /// ```
-    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Vec<&T>
+    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Vec<T>
     where
+        T: Clone,
         R: RangeBounds<usize>,
         I: IntoIterator<Item = T>,
     {
@@ -390,15 +390,12 @@ impl<T> CowVec<T> {
         // Allocate new elements in arena under a single lock
         let new_ptrs = self.arena.alloc_extend(replace_with);
 
-        // Splice the pointer vector and collect removed pointers
-        let removed_ptrs: Vec<*const T> = self.items_mut().splice(start..end, new_ptrs).collect();
-
-        // Convert removed pointers to references
-        removed_ptrs
-            .into_iter()
+        // Splice the pointer vector and clone out the removed values
+        self.items_mut()
+            .splice(start..end, new_ptrs)
             .map(|ptr| {
                 // SAFETY: Pointer is valid for arena's lifetime
-                unsafe { &*ptr }
+                unsafe { &*ptr }.clone()
             })
             .collect()
     }
@@ -417,16 +414,18 @@ impl<T: Clone> CowVec<T> {
         self.iter().cloned().collect()
     }
 
-    /// Clones this `CowVec`, creating a fresh arena if the current one exceeds max_capacity.
+    /// Clones this `CowVec`, compacting into a fresh arena if the current one
+    /// holds more than `max_allocations` values.
     ///
-    /// If the arena's allocation count exceeds `max_capacity`, a new arena is created
-    /// containing only the current elements (compacting the data). Otherwise, the arena
-    /// is shared as with regular `clone()`.
+    /// If the arena's total allocation count exceeds `max_allocations`, the
+    /// clone gets a new arena containing only the currently visible elements.
+    /// Otherwise this behaves exactly like `clone()`.
     ///
-    /// This is useful for controlling memory growth when the arena has accumulated
-    /// many allocations from `push`, `set`, or garbage from `pop`/`remove` operations.
-    pub fn clone_with_max_capacity(&self, max_capacity: usize) -> Self {
-        if self.arena.len() <= max_capacity {
+    /// This is the way to reclaim memory from garbage accumulated by `set`,
+    /// `pop`, `remove`, and similar operations, whose old values stay in the
+    /// shared arena.
+    pub fn clone_compacted(&self, max_allocations: usize) -> Self {
+        if self.arena.len() <= max_allocations {
             return self.clone();
         }
 
@@ -463,6 +462,52 @@ impl<T> CowVec<T> {
         }
         let ptr = self.arena.alloc(value);
         self.items_mut()[index] = ptr;
+    }
+
+    /// Returns a mutable reference to the element at `index`, first copying
+    /// its value to a fresh arena slot (copy-on-write).
+    ///
+    /// Like [`Arc::make_mut`], the name makes the cost explicit: every call
+    /// clones the current value into a new arena allocation, even if nothing
+    /// is written through the returned reference. Other clones of this
+    /// `CowVec` keep seeing the original value.
+    ///
+    /// For replacing a value wholesale, prefer [`set`](Self::set), which
+    /// moves the new value in without cloning the old one.
+    ///
+    /// # Panics
+    /// Panics if `index >= len()`.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let vec1 = CowVec::from(vec![String::from("hello")]);
+    /// let mut vec2 = vec1.clone();
+    /// vec2.make_mut(0).push_str(" world");
+    /// assert_eq!(vec1[0], "hello");
+    /// assert_eq!(vec2[0], "hello world");
+    /// ```
+    pub fn make_mut(&mut self, index: usize) -> &mut T
+    where
+        T: Clone,
+    {
+        if index >= self.items.len() {
+            panic!(
+                "index out of bounds: the len is {} but the index is {}",
+                self.len(),
+                index
+            );
+        }
+        // Clone the current value to a new arena location (copy-on-write).
+        // SAFETY: Same as get() - pointer is valid for arena's lifetime
+        let current = unsafe { &*self.items[index] }.clone();
+        let ptr = self.arena.alloc(current);
+        self.items_mut()[index] = ptr;
+        // SAFETY: The pointer was just allocated with write provenance and no
+        // other CowVec references it. We have exclusive access via &mut self,
+        // and the returned borrow keeps &mut self alive.
+        unsafe { &mut *(ptr as *mut T) }
     }
 }
 
@@ -605,61 +650,5 @@ impl<T> Index<usize> for CowVec<T> {
     /// Panics if `index >= len()`.
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index out of bounds")
-    }
-}
-
-/// # WARNING: HIDDEN ALLOCATION ON EVERY MUTABLE ACCESS
-///
-/// Unlike `Vec`, mutable indexing on `CowVec` allocates a NEW value in the arena
-/// on EVERY access, even if you don't actually modify the value. This is because
-/// `CowVec` implements copy-on-write semantics and cannot know at the time of
-/// `index_mut()` whether you intend to write.
-///
-/// ## Examples of Hidden Allocations
-///
-/// ```
-/// use cow_vec::CowVec;
-///
-/// let mut vec = CowVec::from(vec![1, 2, 3]);
-///
-/// vec[0] = 5;       // Allocates new value (expected)
-/// vec[0] += 1;      // Allocates new value (might be surprising)
-/// let _ = &mut vec[0];  // Allocates even if never written to!
-///
-/// // This loop allocates 100 times:
-/// for _ in 0..100 {
-///     vec[0] += 1;  // Each iteration allocates
-/// }
-/// ```
-///
-/// ## Recommendation
-///
-/// Prefer using `set()` for mutations - it's explicit about the allocation:
-///
-/// ```
-/// use cow_vec::CowVec;
-///
-/// let mut vec = CowVec::from(vec![1, 2, 3]);
-/// vec.set(0, 5);              // Clear: allocates once
-/// vec.set(0, vec[0] + 1);     // Clear: allocates once
-/// ```
-///
-/// Only use `IndexMut` when you need compatibility with code expecting `&mut T`.
-impl<T: Clone> IndexMut<usize> for CowVec<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        if index >= self.items.len() {
-            panic!(
-                "index out of bounds: the len is {} but the index is {}",
-                self.len(),
-                index
-            );
-        }
-        // Clone the current value to a new arena location (copy-on-write).
-        let current = unsafe { &*self.items[index] }.clone();
-        let ptr = self.arena.alloc(current);
-        self.items_mut()[index] = ptr;
-        // SAFETY: The pointer was just allocated and is valid. We have exclusive
-        // access via &mut self. The arena allocates mutable memory.
-        unsafe { &mut *(ptr as *mut T) }
     }
 }

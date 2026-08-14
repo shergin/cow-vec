@@ -231,10 +231,10 @@ fn test_first_and_last() {
 #[test]
 fn test_pop() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(vec.pop(), Some(&3));
+    assert_eq!(vec.pop(), Some(3));
     assert_eq!(vec.len(), 2);
-    assert_eq!(vec.pop(), Some(&2));
-    assert_eq!(vec.pop(), Some(&1));
+    assert_eq!(vec.pop(), Some(2));
+    assert_eq!(vec.pop(), Some(1));
     assert_eq!(vec.pop(), None);
     assert!(vec.is_empty());
 }
@@ -252,7 +252,7 @@ fn test_pop_does_not_affect_clones() {
 #[test]
 fn test_remove() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    assert_eq!(vec.remove(2), &3);
+    assert_eq!(vec.remove(2), 3);
     assert_eq!(vec.len(), 4);
     assert_eq!(vec[0], 1);
     assert_eq!(vec[1], 2);
@@ -263,11 +263,11 @@ fn test_remove() {
 #[test]
 fn test_remove_first_and_last() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(vec.remove(0), &1);
+    assert_eq!(vec.remove(0), 1);
     assert_eq!(vec[0], 2);
 
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(vec.remove(2), &3);
+    assert_eq!(vec.remove(2), 3);
     assert_eq!(vec.len(), 2);
 }
 
@@ -354,11 +354,11 @@ fn test_extend_empty() {
 }
 
 #[test]
-fn test_position() {
+fn test_position_via_iterator() {
     let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    assert_eq!(vec.position(|&x| x == 3), Some(2));
-    assert_eq!(vec.position(|&x| x == 10), None);
-    assert_eq!(vec.position(|&x| x > 3), Some(3));
+    assert_eq!(vec.iter().position(|&x| x == 3), Some(2));
+    assert_eq!(vec.iter().position(|&x| x == 10), None);
+    assert_eq!(vec.iter().position(|&x| x > 3), Some(3));
 }
 
 #[test]
@@ -401,9 +401,9 @@ fn test_operations_chain() {
 }
 
 #[test]
-fn test_clone_with_max_capacity_shares_arena_when_under_limit() {
+fn test_clone_compacted_shares_arena_when_under_limit() {
     let vec1 = CowVec::from(vec![1, 2, 3]);
-    let vec2 = vec1.clone_with_max_capacity(10);
+    let vec2 = vec1.clone_compacted(10);
 
     // Both should have the same values.
     assert_eq!(vec1.to_vec(), vec2.to_vec());
@@ -419,7 +419,7 @@ fn test_clone_with_max_capacity_shares_arena_when_under_limit() {
 }
 
 #[test]
-fn test_clone_with_max_capacity_creates_new_arena_when_over_limit() {
+fn test_clone_compacted_creates_new_arena_when_over_limit() {
     let mut vec1 = CowVec::from(vec![1, 2, 3]);
 
     // Make many allocations to exceed the limit.
@@ -429,7 +429,7 @@ fn test_clone_with_max_capacity_creates_new_arena_when_over_limit() {
     // Now arena has 3 (initial) + 10 (sets) = 13 allocations.
 
     // Clone with max_capacity of 5 should create a new arena.
-    let vec2 = vec1.clone_with_max_capacity(5);
+    let vec2 = vec1.clone_compacted(5);
 
     // Values should be the same.
     assert_eq!(vec1.to_vec(), vec2.to_vec());
@@ -445,7 +445,7 @@ fn test_clone_with_max_capacity_creates_new_arena_when_over_limit() {
 }
 
 #[test]
-fn test_clone_with_max_capacity_compacts_after_pop() {
+fn test_clone_compacted_compacts_after_pop() {
     let mut vec1 = CowVec::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
     // Pop most elements (they remain in arena as garbage).
@@ -455,48 +455,48 @@ fn test_clone_with_max_capacity_compacts_after_pop() {
     // Now vec1 has 2 elements but arena has 10 allocations.
 
     // Clone with max_capacity of 5 should create a fresh arena.
-    let vec2 = vec1.clone_with_max_capacity(5);
+    let vec2 = vec1.clone_compacted(5);
 
     assert_eq!(vec2.len(), 2);
     assert_eq!(vec2.to_vec(), vec![1, 2]);
 }
 
 #[test]
-fn test_clone_with_max_capacity_at_exact_limit() {
+fn test_clone_compacted_at_exact_limit() {
     let vec1 = CowVec::from(vec![1, 2, 3]);
     // Arena has exactly 3 allocations.
 
     // Clone with max_capacity of 3 should share arena (not exceed).
-    let vec2 = vec1.clone_with_max_capacity(3);
+    let vec2 = vec1.clone_compacted(3);
     assert_eq!(vec2.to_vec(), vec![1, 2, 3]);
 
     // Clone with max_capacity of 2 should create new arena (exceeds).
-    let vec3 = vec1.clone_with_max_capacity(2);
+    let vec3 = vec1.clone_compacted(2);
     assert_eq!(vec3.to_vec(), vec![1, 2, 3]);
 }
 
 #[test]
-fn test_index_mut_basic() {
+fn test_make_mut_basic() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    vec[0] = 100;
+    *vec.make_mut(0) = 100;
     assert_eq!(vec[0], 100);
     assert_eq!(vec[1], 2);
     assert_eq!(vec[2], 3);
 }
 
 #[test]
-fn test_index_mut_compound_assignment() {
-    let mut vec = CowVec::from(vec![10, 20, 30]);
-    vec[1] += 5;
-    assert_eq!(vec[1], 25);
+fn test_make_mut_in_place_mutation() {
+    let mut vec = CowVec::from(vec![String::from("ab")]);
+    vec.make_mut(0).push('c');
+    assert_eq!(vec[0], "abc");
 }
 
 #[test]
-fn test_index_mut_does_not_affect_clones() {
+fn test_make_mut_does_not_affect_clones() {
     let vec1 = CowVec::from(vec![1, 2, 3]);
     let mut vec2 = vec1.clone();
 
-    vec2[0] = 100;
+    *vec2.make_mut(0) = 100;
 
     // vec1 should be unchanged (copy-on-write).
     assert_eq!(vec1[0], 1);
@@ -505,9 +505,9 @@ fn test_index_mut_does_not_affect_clones() {
 
 #[test]
 #[should_panic(expected = "index out of bounds")]
-fn test_index_mut_out_of_bounds() {
+fn test_make_mut_out_of_bounds() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    vec[3] = 100;
+    *vec.make_mut(3) = 100;
 }
 
 #[test]
@@ -587,7 +587,7 @@ fn test_extend_does_not_affect_clones() {
 #[test]
 fn test_position_empty() {
     let vec: CowVec<i32> = CowVec::new();
-    assert_eq!(vec.position(|&x| x == 1), None);
+    assert_eq!(vec.iter().position(|&x| x == 1), None);
 }
 
 #[test]
@@ -879,23 +879,23 @@ fn test_split_off_out_of_bounds() {
 #[test]
 fn test_splice_replace_middle() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let removed: Vec<&i32> = vec.splice(1..3, vec![10, 20, 30]);
-    assert_eq!(removed, vec![&2, &3]);
+    let removed: Vec<i32> = vec.splice(1..3, vec![10, 20, 30]);
+    assert_eq!(removed, vec![2, 3]);
     assert_eq!(vec.to_vec(), vec![1, 10, 20, 30, 4, 5]);
 }
 
 #[test]
 fn test_splice_remove_only() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let removed: Vec<&i32> = vec.splice(1..4, vec![]);
-    assert_eq!(removed, vec![&2, &3, &4]);
+    let removed: Vec<i32> = vec.splice(1..4, vec![]);
+    assert_eq!(removed, vec![2, 3, 4]);
     assert_eq!(vec.to_vec(), vec![1, 5]);
 }
 
 #[test]
 fn test_splice_insert_only() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    let removed: Vec<&i32> = vec.splice(1..1, vec![10, 20]);
+    let removed: Vec<i32> = vec.splice(1..1, vec![10, 20]);
     assert!(removed.is_empty());
     assert_eq!(vec.to_vec(), vec![1, 10, 20, 2, 3]);
 }
@@ -903,32 +903,32 @@ fn test_splice_insert_only() {
 #[test]
 fn test_splice_replace_beginning() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let removed: Vec<&i32> = vec.splice(0..2, vec![10]);
-    assert_eq!(removed, vec![&1, &2]);
+    let removed: Vec<i32> = vec.splice(0..2, vec![10]);
+    assert_eq!(removed, vec![1, 2]);
     assert_eq!(vec.to_vec(), vec![10, 3, 4, 5]);
 }
 
 #[test]
 fn test_splice_replace_end() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let removed: Vec<&i32> = vec.splice(3..5, vec![10, 20, 30]);
-    assert_eq!(removed, vec![&4, &5]);
+    let removed: Vec<i32> = vec.splice(3..5, vec![10, 20, 30]);
+    assert_eq!(removed, vec![4, 5]);
     assert_eq!(vec.to_vec(), vec![1, 2, 3, 10, 20, 30]);
 }
 
 #[test]
 fn test_splice_replace_all() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
-    let removed: Vec<&i32> = vec.splice(.., vec![10, 20]);
-    assert_eq!(removed, vec![&1, &2, &3]);
+    let removed: Vec<i32> = vec.splice(.., vec![10, 20]);
+    assert_eq!(removed, vec![1, 2, 3]);
     assert_eq!(vec.to_vec(), vec![10, 20]);
 }
 
 #[test]
 fn test_splice_inclusive_range() {
     let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let removed: Vec<&i32> = vec.splice(1..=3, vec![10]);
-    assert_eq!(removed, vec![&2, &3, &4]);
+    let removed: Vec<i32> = vec.splice(1..=3, vec![10]);
+    assert_eq!(removed, vec![2, 3, 4]);
     assert_eq!(vec.to_vec(), vec![1, 10, 5]);
 }
 
