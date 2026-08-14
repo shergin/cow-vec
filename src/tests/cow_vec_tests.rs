@@ -1027,3 +1027,63 @@ fn test_sharing_with_multiple_clones() {
     assert!(vec2.is_storage_shared());
     assert!(vec3.is_storage_shared());
 }
+
+#[test]
+fn test_iter_reverse() {
+    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let reversed: Vec<i32> = vec.iter().rev().cloned().collect();
+    assert_eq!(reversed, vec![5, 4, 3, 2, 1]);
+}
+
+#[test]
+fn test_iter_from_both_ends() {
+    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
+    let mut iter = vec.iter();
+    assert_eq!(iter.next(), Some(&1));
+    assert_eq!(iter.next_back(), Some(&5));
+    assert_eq!(iter.next(), Some(&2));
+    assert_eq!(iter.next_back(), Some(&4));
+    assert_eq!(iter.next(), Some(&3));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+}
+
+#[test]
+fn test_iter_nth_and_len() {
+    let vec = CowVec::from(vec![10, 20, 30, 40, 50]);
+    let mut iter = vec.iter();
+    assert_eq!(iter.len(), 5);
+    assert_eq!(iter.nth(2), Some(&30));
+    assert_eq!(iter.len(), 2);
+    assert_eq!(iter.nth_back(1), Some(&40));
+    assert_eq!(iter.len(), 0);
+}
+
+#[test]
+fn test_iter_clone_is_independent() {
+    let vec = CowVec::from(vec![1, 2, 3]);
+    let mut a = vec.iter();
+    a.next();
+    let mut b = a.clone();
+    assert_eq!(a.next(), Some(&2));
+    assert_eq!(b.next(), Some(&2));
+}
+
+#[test]
+#[allow(clippy::unnecessary_fold)] // exercises the forwarded fold implementation
+fn test_iter_fold_and_rfold() {
+    let vec = CowVec::from(vec![1, 2, 3, 4]);
+    let sum = vec.iter().fold(0, |acc, &x| acc + x);
+    assert_eq!(sum, 10);
+    let concat = vec
+        .iter()
+        .rfold(String::new(), |acc, x| acc + &x.to_string());
+    assert_eq!(concat, "4321");
+}
+
+#[test]
+fn test_iter_count_and_last() {
+    let vec = CowVec::from(vec![7, 8, 9]);
+    assert_eq!(vec.iter().count(), 3);
+    assert_eq!(vec.iter().last(), Some(&9));
+}

@@ -195,12 +195,15 @@ impl<T> CowVec<T> {
         self.items_mut().push(ptr);
     }
 
+    /// Returns the internal pointer slice for iterator construction.
+    #[inline]
+    pub(crate) fn items_slice(&self) -> &[*const T] {
+        &self.items
+    }
+
     /// Returns an iterator over references to the elements.
     pub fn iter(&self) -> CowVecIter<'_, T> {
-        CowVecIter {
-            vec: self,
-            position: 0,
-        }
+        CowVecIter::new(self)
     }
 
     /// Returns a reference to the first element, or `None` if empty.
