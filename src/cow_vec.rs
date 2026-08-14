@@ -36,7 +36,10 @@ impl<T> CowArena<T> {
     fn alloc(&self, value: T) -> *const T {
         let arena = self.arena.lock().unwrap();
         let reference = arena.alloc(value);
-        reference as *const T
+        // Cast through *mut so the pointer keeps write provenance; IndexMut
+        // writes through it after casting back. A direct `&mut T as *const T`
+        // reborrows as shared and makes that write undefined behavior.
+        reference as *mut T as *const T
     }
 
     /// Returns the total number of allocations in this arena.
