@@ -1,15 +1,15 @@
 [package]
 name = "cow_vec"
-version = "1.4.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Valentin Shergin"]
-description = "A vector-like container optimized for efficient cloning with copy-on-write semantics"
+description = "Vectors optimized for O(1) clone: flat and paged copy-on-write containers that copy pointers, never elements"
 license = "MIT"
 repository = "https://github.com/shergin/cow-vec"
 documentation = "https://docs.rs/cow_vec"
 readme = "README.md"
-keywords = ["vector", "copy-on-write", "cow", "persistent", "clone"]
+keywords = ["vector", "copy-on-write", "cow", "persistent", "snapshot"]
 categories = ["data-structures", "memory-management"]
 
 [dependencies]
