@@ -143,7 +143,8 @@ impl<T> CowVec<T> {
         // 2. All pointers in `self.items` are valid for the arena's lifetime
         // 3. The arena outlives this `CowVec` (guaranteed by Arc)
         // 4. The returned slice borrows `&self`, so it cannot outlive the CowVec
-        // 5. The arena is append-only, so pointers are never invalidated
+        // 5. Values are only moved out or dropped under `&mut self`, which
+        //    cannot overlap this borrow, so no pointer is invalidated
         unsafe { std::mem::transmute(self.items.as_slice()) }
     }
 

@@ -141,8 +141,8 @@ on first write (`Arc::make_mut`). `CowVec` copies the whole thing;
 `PagedVec` copies the root table and whichever 8 KB pages you actually
 touch.
 
-**Storage** is append-only bump arenas. An instance only allocates into an
-arena it *uniquely owns*. The first allocation after a clone freezes the
+**Storage** is bump arenas, append-only for as long as they are shared.
+An instance only allocates into an arena it *uniquely owns*. The first allocation after a clone freezes the
 now-shared arena onto an `Arc` keep-alive chain and starts a fresh one.
 That is why `push`/`set` never take a lock: clones on different threads
 never fight over the same arena. Values never move, so the raw pointers in
@@ -277,8 +277,8 @@ thousands of generations deep unwinds without blowing the stack.
 
 ## Safety and testing
 
-This crate is raw pointers into append-only arenas, so verification is
-part of the product:
+This crate is raw pointers into arenas that never move a value while
+anything else can see it, so verification is part of the product:
 
 - The **entire test suite runs under Miri** (Stacked Borrows) in CI —
   concurrency tests included. Pointer provenance is preserved through
