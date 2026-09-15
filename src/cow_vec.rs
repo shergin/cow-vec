@@ -225,9 +225,9 @@ impl<T> CowVec<T> {
     }
 
     /// Moves the value at `ptr` out of storage if nothing else can reach
-    /// it, and clones it otherwise. `ptr` must already be gone from the
-    /// pointer table.
-    fn take_or_clone(&mut self, ptr: *const T) -> T
+    /// it, and clones it otherwise. The caller must never read `ptr`
+    /// through the pointer table again.
+    pub(crate) fn take_or_clone(&mut self, ptr: *const T) -> T
     where
         T: Clone,
     {

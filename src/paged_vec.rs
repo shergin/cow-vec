@@ -852,3 +852,84 @@ impl<'a, T, const N: usize> IntoIterator for &'a PagedVec<T, N> {
         self.iter()
     }
 }
+
+/// An owning iterator over the elements of a `PagedVec`.
+///
+/// Each element is moved out of storage the vector owns alone and cloned
+/// out of storage it shares with clones, the rule [`pop`](PagedVec::pop)
+/// follows. Elements not consumed are dropped with the iterator.
+pub struct PagedVecIntoIter<T, const PAGE_SIZE: usize> {
+    vec: PagedVec<T, PAGE_SIZE>,
+    front: usize,
+    /// Exclusive.
+    back: usize,
+}
+
+impl<T: Clone, const N: usize> PagedVecIntoIter<T, N> {
+    /// Takes the element at `index`, which must not be visited again.
+    #[inline]
+    fn take(&mut self, index: usize) -> T {
+        let (page, slot) = PagedVec::<T, N>::split(index);
+        let ptr = self.vec.pages[page].slots[slot];
+        self.vec.storage.try_take(ptr).unwrap_or_else(|| {
+            // SAFETY: In-bounds slot of the owned vector; see get().
+            unsafe { &*ptr }.clone()
+        })
+    }
+}
+
+impl<T: Clone, const N: usize> Iterator for PagedVecIntoIter<T, N> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        if self.front < self.back {
+            let value = self.take(self.front);
+            self.front += 1;
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: Clone, const N: usize> DoubleEndedIterator for PagedVecIntoIter<T, N> {
+    #[inline]
+    fn next_back(&mut self) -> Option<T> {
+        if self.front < self.back {
+            self.back -= 1;
+            Some(self.take(self.back))
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: Clone, const N: usize> ExactSizeIterator for PagedVecIntoIter<T, N> {}
+
+impl<T: Clone, const N: usize> FusedIterator for PagedVecIntoIter<T, N> {}
+
+impl<T: Clone, const N: usize> IntoIterator for PagedVec<T, N> {
+    type Item = T;
+    type IntoIter = PagedVecIntoIter<T, N>;
+
+    /// Creates an owning iterator over the elements.
+    ///
+    /// Elements are moved out when nothing else references this vector's
+    /// storage and cloned otherwise, as with [`pop`](PagedVec::pop). To
+    /// iterate by reference, use [`iter`](PagedVec::iter) or `&vec`.
+    fn into_iter(self) -> Self::IntoIter {
+        let back = self.len;
+        PagedVecIntoIter {
+            vec: self,
+            front: 0,
+            back,
+        }
+    }
+}

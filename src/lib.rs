@@ -9,8 +9,8 @@ mod storage;
 mod traits;
 
 pub use cow_vec::CowVec;
-pub use iterator::CowVecIter;
-pub use paged_vec::{PagedVec, PagedVecIter};
+pub use iterator::{CowVecIntoIter, CowVecIter};
+pub use paged_vec::{PagedVec, PagedVecIntoIter, PagedVecIter};
 pub use traits::CowVector;
 
 #[cfg(test)]

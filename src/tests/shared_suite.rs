@@ -418,6 +418,61 @@ macro_rules! shared_vec_tests {
             }
 
             #[test]
+            fn into_iter_moves_when_owned_and_clones_otherwise() {
+                let counters = Counters::new();
+                let v = $V::from((0..20).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+                let values: Vec<i32> = v.into_iter().map(|t| t.value).collect();
+                assert_eq!(values, (0..20).collect::<Vec<_>>());
+                assert_eq!(counters.clones(), 0, "sole owner moves every element");
+                assert_eq!(
+                    counters.drops(),
+                    20,
+                    "each moved value dropped exactly once"
+                );
+
+                let counters = Counters::new();
+                let v = $V::from((0..20).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+                let snapshot = v.clone();
+                let mut it = v.into_iter();
+                assert_eq!(it.len(), 20);
+                assert_eq!(it.next().map(|t| t.value), Some(0));
+                assert_eq!(it.next_back().map(|t| t.value), Some(19));
+                assert_eq!(it.len(), 18);
+                assert_eq!(counters.clones(), 2, "a live clone forces copies");
+                drop(it); // the 18 unconsumed elements were never cloned
+                assert_eq!(counters.drops(), 2);
+                assert_eq!(snapshot.len(), 20);
+                drop(snapshot);
+                assert_eq!(counters.drops(), 22);
+            }
+
+            #[test]
+            fn into_iter_partial_consumption_drops_the_rest_once() {
+                let counters = Counters::new();
+                let v = $V::from((0..10).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+                let mut it = v.into_iter();
+                assert_eq!(it.next().map(|t| t.value), Some(0));
+                assert_eq!(it.next_back().map(|t| t.value), Some(9));
+                assert_eq!(counters.drops(), 2);
+                drop(it);
+                assert_eq!(
+                    counters.drops(),
+                    10,
+                    "remaining values dropped with the iterator"
+                );
+                assert_eq!(counters.clones(), 0);
+
+                // Empty and by-ref iteration still work as before.
+                let empty = $V::<i32>::new();
+                assert_eq!(empty.into_iter().next(), None);
+                let v = $V::from(vec![1, 2, 3]);
+                let by_ref: Vec<&i32> = (&v).into_iter().collect();
+                assert_eq!(by_ref, vec![&1, &2, &3]);
+                let owned: Vec<i32> = v.into_iter().rev().collect();
+                assert_eq!(owned, vec![3, 2, 1]);
+            }
+
+            #[test]
             fn storage_sharing_is_reported() {
                 let v1 = $V::from(vec![1, 2, 3]);
                 assert!(!v1.is_storage_shared());

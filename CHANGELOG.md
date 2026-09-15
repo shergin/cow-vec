@@ -7,6 +7,11 @@
 - **`compact(max_allocations)`** on both types: rebuilds the storage in
   place, moving the elements when nothing else references it and cloning
   them otherwise. `clone_compacted` still always clones.
+- **Owned `IntoIterator`** for both types (`T: Clone`): `for x in vec`
+  moves each element out when nothing else references the storage and
+  clones it otherwise, the same rule as `pop`. Note for existing code:
+  `vec.into_iter()` on an owned vector now yields `T` instead of
+  auto-referencing to the `&T` iterator; use `vec.iter()` for references.
 - **`CowVector<T>` trait** naming the API both types share (`len`, `get`,
   `iter`, `push`, `pop`, `set`, `make_mut`, `truncate`, `compact`, and
   the sharing introspection), so code can be generic over which vector
