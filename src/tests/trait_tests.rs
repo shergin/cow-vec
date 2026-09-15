@@ -17,6 +17,8 @@ fn exercise<V: CowVector<String>>() {
     branch.make_mut(4).push('!');
     branch.push("forty".into());
     assert_eq!(branch.pop().as_deref(), Some("forty"));
+    branch.insert(0, "front".into());
+    assert_eq!(branch.remove(0).as_str(), "front");
     assert_eq!(branch[3], "three");
     assert_eq!(branch[4], "4!");
     assert_eq!(base[3], "3");

@@ -18,9 +18,10 @@
   it snapshots.
 - `PagedVec::append`, which shares the other vector's pages outright when
   this vector's length is page-aligned and copies pointers otherwise;
-  `PagedVec::swap`; and the `sort`/`sort_by`/`sort_by_key`/
-  `sort_unstable`/`sort_unstable_by` family on `PagedVec`, all reordering
-  pointers only.
+  `PagedVec::insert`, `remove`, and `splice`, which rewrite the pages
+  after the index; `PagedVec::swap`; and the `sort`/`sort_by`/
+  `sort_by_key`/`sort_unstable`/`sort_unstable_by` family on `PagedVec`,
+  all reordering pointers only.
 
 ### Changed
 

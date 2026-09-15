@@ -1,6 +1,6 @@
 use std::fmt;
 use std::iter::FusedIterator;
-use std::ops::Index;
+use std::ops::{Bound, Index, Range, RangeBounds};
 use std::sync::Arc;
 
 use crate::storage::Storage;
@@ -382,6 +382,125 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         }
     }
 
+    /// Inserts an element at position `index`, shifting everything after
+    /// it right by one.
+    ///
+    /// Only pointers move, but every page from `index` onwards is
+    /// rewritten, so this costs O(n - index) pointer copies plus a copy of
+    /// each of those pages that is shared with a clone.
+    ///
+    /// # Panics
+    /// Panics if `index > len()`.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::PagedVec;
+    ///
+    /// let mut vec: PagedVec<i32> = PagedVec::from(vec![1, 2, 3]);
+    /// vec.insert(1, 10);
+    /// assert_eq!(vec.to_vec(), vec![1, 10, 2, 3]);
+    /// ```
+    pub fn insert(&mut self, index: usize, value: T) {
+        assert!(
+            index <= self.len,
+            "insertion index (is {index}) should be <= len (is {})",
+            self.len
+        );
+        let ptr = self.storage.alloc(value);
+        let mut tail = Vec::with_capacity(self.len - index + 1);
+        tail.push(ptr);
+        tail.extend(self.ptrs_in(index..self.len));
+        self.write_from(index, &tail);
+    }
+
+    /// Removes and returns the element at `index`, shifting everything
+    /// after it left by one.
+    ///
+    /// The value is moved out when nothing else references this vector's
+    /// storage and cloned otherwise, as with [`pop`](Self::pop). Costs
+    /// O(n - index) pointer copies, as [`insert`](Self::insert) does.
+    ///
+    /// # Panics
+    /// Panics if `index >= len()`.
+    pub fn remove(&mut self, index: usize) -> T
+    where
+        T: Clone,
+    {
+        assert!(
+            index < self.len,
+            "removal index (is {index}) should be < len (is {})",
+            self.len
+        );
+        let (page, slot) = Self::split(index);
+        let ptr = self.pages[page].slots[slot];
+        let tail: Vec<*const T> = self.ptrs_in(index + 1..self.len).collect();
+        self.write_from(index, &tail);
+        self.storage.try_take(ptr).unwrap_or_else(|| {
+            // SAFETY: Pointer is valid for the arena's lifetime; see get().
+            unsafe { &*ptr }.clone()
+        })
+    }
+
+    /// Removes the specified range and replaces it with elements from the
+    /// iterator.
+    ///
+    /// Returns the removed elements, moved out if nothing else references
+    /// this vector's storage and cloned otherwise, as with
+    /// [`pop`](Self::pop). Every page from the start of the range onwards
+    /// is rewritten.
+    ///
+    /// # Panics
+    /// Panics if the range is out of bounds or its start is past its end.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::PagedVec;
+    ///
+    /// let mut vec: PagedVec<i32> = PagedVec::from(vec![1, 2, 3, 4, 5]);
+    /// let removed: Vec<i32> = vec.splice(1..3, vec![10, 20, 30]);
+    /// assert_eq!(removed, vec![2, 3]);
+    /// assert_eq!(vec.to_vec(), vec![1, 10, 20, 30, 4, 5]);
+    /// ```
+    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Vec<T>
+    where
+        T: Clone,
+        R: RangeBounds<usize>,
+        I: IntoIterator<Item = T>,
+    {
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.len,
+        };
+        assert!(
+            start <= end,
+            "slice index starts at {start} but ends at {end}"
+        );
+        assert!(
+            end <= self.len,
+            "range end index {end} out of range for slice of length {}",
+            self.len
+        );
+        let removed: Vec<*const T> = self.ptrs_in(start..end).collect();
+        let mut tail = self.storage.alloc_extend(replace_with);
+        tail.extend(self.ptrs_in(end..self.len));
+        self.write_from(start, &tail);
+        removed
+            .into_iter()
+            .map(|ptr| {
+                self.storage.try_take(ptr).unwrap_or_else(|| {
+                    // SAFETY: Pointer is valid for the arena's lifetime.
+                    unsafe { &*ptr }.clone()
+                })
+            })
+            .collect()
+    }
+
     /// Swaps two elements.
     ///
     /// Copies the touched page or pages if they are shared.
@@ -459,10 +578,40 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
 
     /// The pointer of every element, in order.
     fn ptrs(&self) -> impl Iterator<Item = *const T> + '_ {
-        (0..self.len).map(|index| {
+        self.ptrs_in(0..self.len)
+    }
+
+    /// The pointers of the elements in `range`, in order.
+    fn ptrs_in(&self, range: Range<usize>) -> impl Iterator<Item = *const T> + '_ {
+        debug_assert!(range.end <= self.len);
+        range.map(|index| {
             let (page, slot) = Self::split(index);
             self.pages[page].slots[slot]
         })
+    }
+
+    /// Writes `ptrs` at positions `start..`, making that the end of the
+    /// vector: the length becomes `start + ptrs.len()` and trailing pages
+    /// no longer needed are released.
+    fn write_from(&mut self, start: usize, ptrs: &[*const T]) {
+        debug_assert!(start <= self.len);
+        let new_len = start + ptrs.len();
+        let pages = self.pages_mut();
+        pages.truncate(new_len.div_ceil(PAGE_SIZE));
+        let mut index = start;
+        let mut i = 0;
+        while i < ptrs.len() {
+            let (page, slot) = Self::split(index);
+            if page == pages.len() {
+                pages.push(Arc::new(Page::empty()));
+            }
+            let take = (PAGE_SIZE - slot).min(ptrs.len() - i);
+            Arc::make_mut(&mut pages[page]).slots[slot..slot + take]
+                .copy_from_slice(&ptrs[i..i + take]);
+            index += take;
+            i += take;
+        }
+        self.len = new_len;
     }
 
     /// Reorders the elements by gathering every pointer, letting `f`

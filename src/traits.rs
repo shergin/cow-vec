@@ -62,6 +62,22 @@ pub trait CowVector<T>:
     /// Appends an element.
     fn push(&mut self, value: T);
 
+    /// Inserts an element at `index`, shifting the rest right.
+    ///
+    /// # Panics
+    /// Panics if `index > len()`.
+    fn insert(&mut self, index: usize, value: T);
+
+    /// Removes and returns the element at `index`, shifting the rest left.
+    /// Moves it out when the storage is not shared and clones it
+    /// otherwise.
+    ///
+    /// # Panics
+    /// Panics if `index >= len()`.
+    fn remove(&mut self, index: usize) -> T
+    where
+        T: Clone;
+
     /// Removes the last element and returns it, moving it out when the
     /// storage is not shared and cloning it otherwise.
     fn pop(&mut self) -> Option<T>
@@ -148,6 +164,17 @@ impl<T> CowVector<T> for CowVec<T> {
         self.push(value);
     }
 
+    fn insert(&mut self, index: usize, value: T) {
+        self.insert(index, value);
+    }
+
+    fn remove(&mut self, index: usize) -> T
+    where
+        T: Clone,
+    {
+        self.remove(index)
+    }
+
     fn pop(&mut self) -> Option<T>
     where
         T: Clone,
@@ -225,6 +252,17 @@ impl<T, const N: usize> CowVector<T> for PagedVec<T, N> {
 
     fn push(&mut self, value: T) {
         self.push(value);
+    }
+
+    fn insert(&mut self, index: usize, value: T) {
+        self.insert(index, value);
+    }
+
+    fn remove(&mut self, index: usize) -> T
+    where
+        T: Clone,
+    {
+        self.remove(index)
     }
 
     fn pop(&mut self) -> Option<T>

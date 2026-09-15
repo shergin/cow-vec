@@ -18,7 +18,7 @@ what happens the first time a clone writes:
 | Diverge 50 elements of 4M | ~32 MB copied | ~0.4 MB copied |
 | Indexed access | 1 pointer hop | 2 pointer hops (root stays in cache) |
 | `pop` / `truncate` after clone | copies the kept prefix (`clear`: nothing) | copies nothing |
-| Extras | `sort`/`dedup`/`binary_search`, `append`, `split_off`, `splice`, `as_slice` | `sort`, `append` (shares whole pages), `swap` |
+| Extras | `sort`/`dedup`/`binary_search`, `append`, `split_off`, `splice`, `as_slice` | `sort`, `append` (shares whole pages), `insert`/`remove`/`splice`, `swap` |
 
 **CowVec** is the one you want when clones rarely write — or they rewrite
 everything at once — and most of the time you are just reading. **PagedVec**
@@ -159,6 +159,7 @@ chain.
 | `push()` | O(1) amortized, no lock | O(1) amortized, no lock |
 | `set()` | O(1) + COW | O(1) + page COW |
 | `pop()` / `truncate(k)` / `clear()` | O(1); O(k) prefix copy if shared | O(1), copies nothing |
+| `insert(i)` / `remove(i)` | O(n - i) pointer memmove | O(n - i) pointer copies, rewrites pages after i |
 | `sort_*()` | O(n log n) pointer swaps | O(n log n) pointer swaps, rewrites every page |
 | `append()` | O(m) pointer copies | O(m) pointer copies; O(m / PAGE_SIZE) if page-aligned |
 | bulk build (`from`/`collect`) | one allocation batch, values contiguous | same |
@@ -279,8 +280,6 @@ thousands of generations deep unwinds without blowing the stack.
   next `compact`.
 - **Small cheap elements** do not belong here. The pointer hop and
   per-element allocation are pure overhead — use `Vec` or `Arc<Vec<T>>`.
-- `PagedVec` has no `insert`/`remove`/`splice`: shifting elements across
-  pages would rewrite every page after the index.
 
 ## Safety and testing
 

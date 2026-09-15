@@ -205,6 +205,86 @@ fn sort_permutes_pointers_across_pages() {
 }
 
 #[test]
+fn insert_remove_splice_shift_across_pages() {
+    let v1: SmallPaged<i32> = (0..20).collect(); // pages 0-7, 8-15, 16-19
+    let mut v2 = v1.clone();
+
+    v2.insert(0, -1); // every page rewritten
+    v2.insert(9, 99); // page 1 onwards
+    v2.insert(v2.len(), 100); // append
+    let mut expected: Vec<i32> = (0..20).collect();
+    expected.insert(0, -1);
+    expected.insert(9, 99);
+    expected.push(100);
+    assert_eq!(v2.to_vec(), expected);
+    assert_eq!(v1.to_vec(), (0..20).collect::<Vec<_>>());
+
+    assert_eq!(v2.remove(9), 99);
+    assert_eq!(v2.remove(0), -1);
+    assert_eq!(v2.remove(v2.len() - 1), 100);
+    assert_eq!(v2.to_vec(), (0..20).collect::<Vec<_>>());
+    assert_eq!(v2.page_count(), 3);
+
+    let removed: Vec<i32> = v2.splice(6..10, vec![60, 61]); // shrinks across a boundary
+    assert_eq!(removed, vec![6, 7, 8, 9]);
+    let mut expected: Vec<i32> = (0..20).collect();
+    expected.splice(6..10, vec![60, 61]);
+    assert_eq!(v2.to_vec(), expected);
+
+    let removed: Vec<i32> = v2.splice(..=1, (200..210).collect::<Vec<_>>()); // grows
+    assert_eq!(removed, vec![0, 1]);
+    expected.splice(..=1, 200..210);
+    assert_eq!(v2.to_vec(), expected);
+    assert_eq!(v2.page_count(), expected.len().div_ceil(8));
+
+    let removed: Vec<i32> = v2.splice(3.., Vec::new()); // truncates
+    assert_eq!(removed.len(), expected.len() - 3);
+    assert_eq!(v2.to_vec(), expected[..3].to_vec());
+    assert_eq!(v2.page_count(), 1);
+    assert_eq!(v1.to_vec(), (0..20).collect::<Vec<_>>());
+}
+
+#[test]
+fn remove_and_splice_move_when_owned() {
+    use crate::tests::shared_suite::Counters;
+    let counters = Counters::new();
+    let mut v: SmallPaged<_> =
+        PagedVec::from((0..12).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+    assert_eq!(v.remove(3).value, 3);
+    let removed = v.splice(7..9, [counters.tracked(70)]);
+    assert_eq!(
+        removed.iter().map(|t| t.value).collect::<Vec<_>>(),
+        vec![8, 9]
+    );
+    assert_eq!(counters.clones(), 0);
+    assert_eq!(
+        v.iter().map(|t| t.value).collect::<Vec<_>>(),
+        vec![0, 1, 2, 4, 5, 6, 7, 70, 10, 11]
+    );
+}
+
+#[test]
+#[should_panic(expected = "insertion index")]
+fn insert_out_of_bounds_panics() {
+    let mut v: SmallPaged<i32> = (0..3).collect();
+    v.insert(4, 0);
+}
+
+#[test]
+#[should_panic(expected = "removal index")]
+fn remove_out_of_bounds_panics() {
+    let mut v: SmallPaged<i32> = (0..3).collect();
+    v.remove(3);
+}
+
+#[test]
+#[should_panic(expected = "out of range")]
+fn splice_out_of_bounds_panics() {
+    let mut v: SmallPaged<i32> = (0..3).collect();
+    v.splice(2..4, Vec::new());
+}
+
+#[test]
 fn swap_within_and_across_pages() {
     let v1: SmallPaged<i32> = (0..20).collect();
     let mut v2 = v1.clone();
