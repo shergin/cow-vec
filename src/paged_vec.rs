@@ -163,8 +163,8 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         Arc::strong_count(&self.pages) > 1
     }
 
-    /// Returns `true` if the storage (arenas with actual values) may be
-    /// shared with other clones. Conservative between mutations, like
+    /// Returns `true` if the storage (arenas with actual values) is shared
+    /// with other clones. See
     /// [`CowVec::is_storage_shared`](crate::CowVec::is_storage_shared).
     pub fn is_storage_shared(&self) -> bool {
         self.storage.is_shared()

@@ -31,9 +31,10 @@
   `dedup` drop the replaced values immediately; and `make_mut` returns
   the slot in place without allocating. Shared storage behaves as before.
 - **Dead ancestors are reclaimed.** A vector that outlives its clones
-  takes their arenas back on its next mutation, so `is_storage_shared`
-  turns `false` again instead of staying `true` forever, and values from
-  those arenas can be moved like any other.
+  takes their arenas back on its next mutation, and values from those
+  arenas can be moved like any other. `is_storage_shared` is now exact:
+  it turns `false` as soon as the last other owner is gone, instead of
+  staying `true` forever.
 - **A sole owner reuses freed slots.** Slots vacated by a move-out or an
   in-place drop are handed to later allocations, so mutating a vector
   nothing else shares no longer grows its storage. `storage_allocations`

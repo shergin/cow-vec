@@ -97,15 +97,14 @@ impl<T> CowVec<T> {
         Arc::strong_count(&self.items) > 1
     }
 
-    /// Returns `true` if the storage (arenas with actual values) may be
-    /// shared with other clones.
+    /// Returns `true` if the storage (arenas with actual values) is shared
+    /// with other clones, which is what stops this vector from moving
+    /// values out or dropping them in place.
     ///
-    /// This typically returns `true` after any clone operation. It is
-    /// conservative between mutations: storage inherited from a lineage
-    /// whose other owners have all dropped is reclaimed by the next
-    /// mutation, and reports `true` until then. After
-    /// [`append`](Self::append) of a related vector it stays `true` until
-    /// the vector is compacted.
+    /// This returns `true` after any clone operation and `false` again
+    /// once every clone and ancestor that shared the storage is gone.
+    /// After [`append`](Self::append) of a related vector it stays `true`
+    /// until the vector is compacted.
     pub fn is_storage_shared(&self) -> bool {
         self.storage.is_shared()
     }

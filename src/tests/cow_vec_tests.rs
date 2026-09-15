@@ -126,10 +126,12 @@ fn append_of_unrelated_vector_keeps_moves_once_it_is_gone() {
     v.append(&other);
 
     // `other` still owns its arena, so its value has to be cloned out.
+    assert!(v.is_storage_shared());
     assert_eq!(v.pop().map(|t| t.value), Some(2));
     assert_eq!(counters.clones(), 1);
 
     drop(other);
+    assert!(!v.is_storage_shared());
     v.push(counters.tracked(3));
     assert_eq!(v.pop().map(|t| t.value), Some(3));
     assert_eq!(v.pop().map(|t| t.value), Some(1));

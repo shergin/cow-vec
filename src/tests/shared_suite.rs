@@ -340,6 +340,10 @@ macro_rules! shared_vec_tests {
                 v2.set(0, counters.tracked(10)); // diverge: v1's arena is frozen in v2
                 assert!(v2.is_storage_shared());
                 drop(v1);
+                assert!(
+                    !v2.is_storage_shared(),
+                    "reported exactly, before any mutation"
+                );
                 // The next mutation takes the frozen ancestor back, so its
                 // values can be moved out again.
                 assert_eq!(v2.pop().map(|t| t.value), Some(2));

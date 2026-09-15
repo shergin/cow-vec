@@ -418,13 +418,38 @@ impl<T> Storage<T> {
     }
 
     /// Returns `true` if any other instance may still reference values in
-    /// this storage.
+    /// this storage: the active arena has another owner, or some frozen
+    /// ancestor does. A storage that has absorbed a related one reports
+    /// `true` until rebuilt.
     ///
-    /// Conservative between mutations: a frozen chain whose other owners
-    /// have all dropped is only merged back on the next mutation. A storage
-    /// that has absorbed a related one reports `true` until rebuilt.
+    /// Exact, but O(chain length) when every ancestor is dead and not yet
+    /// merged back (the next mutation does that); a live ancestor is found
+    /// after a few atomic loads.
     pub(crate) fn is_shared(&self) -> bool {
-        self.aliased || Arc::strong_count(&self.active) > 1 || self.frozen.is_some()
+        if self.aliased || Arc::strong_count(&self.active) > 1 {
+            return true;
+        }
+        let mut stack: Vec<&ChainNode<T>> = self.frozen.as_deref().into_iter().collect();
+        while let Some(node) = stack.pop() {
+            let shared = match &node.kept {
+                Some(Kept::Arena(arena)) => Arc::strong_count(arena) > 1,
+                Some(Kept::Chain(chain)) => {
+                    stack.push(chain);
+                    Arc::strong_count(chain) > 1
+                }
+                None => false,
+            };
+            if shared {
+                return true;
+            }
+            if let Some(next) = &node.next {
+                if Arc::strong_count(next) > 1 {
+                    return true;
+                }
+                stack.push(next);
+            }
+        }
+        false
     }
 
     /// Number of value slots this storage holds, including ones whose value
