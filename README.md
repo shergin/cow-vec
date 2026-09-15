@@ -173,12 +173,12 @@ version around.
 
 | Scenario | `Vec` | `Arc<Vec>` | `Arc<Vec<Arc>>` | `imbl` | `CowVec` | `PagedVec` |
 |---|---|---|---|---|---|---|
-| clone, 100k | 2.6 ms | 9.8 ns | — | 24 ns | 11 ns | 12 ns |
-| clone + 50 edits, 100k | 1.4 ms | 1.4 ms | 262 µs | 56 µs | 17 µs | **14 µs** |
-| clone + 50 edits, 1M | 13.8 ms | 14.2 ms | 2.6 ms | 69 µs | 171 µs | **23 µs** |
-| 32 chained generations, 1M | — | — | 82 ms | 2.6 ms | 7.9 ms | **1.0 ms** |
-| 10k random reads, 1M | **7.9 µs** | — | 15.9 µs¹ | 377 µs | 16.9 µs | 17.2 µs |
-| full iteration, 1M | **0.62 ms** | — | 1.07 ms¹ | 2.9 ms | 0.69 ms | 0.81 ms |
+| clone, 100k | 2.5 ms | 9.5 ns | — | 19 ns | 12 ns | 12 ns |
+| clone + 50 edits, 100k | 1.3 ms | 1.3 ms | 253 µs | 55 µs | 17 µs | **15 µs** |
+| clone + 50 edits, 1M | 13.3 ms | 13.5 ms | 2.5 ms | 63 µs | 194 µs | **24 µs** |
+| 32 chained generations, 1M | — | — | 81 ms | 2.5 ms | 8.2 ms | **1.1 ms** |
+| 10k random reads, 1M | **7.8 µs** | — | 15.8 µs¹ | 330 µs | 16.9 µs | 17.2 µs |
+| full iteration, 1M | **0.53 ms** | — | 1.00 ms¹ | 2.7 ms | 0.67 ms | 0.71 ms |
 | build from `Vec`, 100k | — | — | — | 923 µs | **14 µs** | 55 µs |
 
 ¹ measured as `Vec<Arc<T>>` (the read path is identical).
@@ -186,13 +186,13 @@ version around.
 What the numbers actually mean:
 
 - **Divergence is where this crate lives.** A 50-edit version of a
-  1M-element vector: `PagedVec` 23 µs, `imbl` 69 µs, `CowVec` 171 µs, and
-  the usual `Arc<Vec<Arc<T>>>` at 2.6 ms. `Arc<Vec<T>>` just pays the full
-  14 ms element-clone bill — the one O(1)-clone types exist to spare you.
+  1M-element vector: `PagedVec` 24 µs, `imbl` 63 µs, `CowVec` 194 µs, and
+  the usual `Arc<Vec<Arc<T>>>` at 2.5 ms. `Arc<Vec<T>>` just pays the full
+  13.5 ms element-clone bill — the one O(1)-clone types exist to spare you.
 - **Access stays flat.** Random reads through `CowVec`/`PagedVec` cost
   about the same as through a plain `Vec<Arc<T>>` (one pointer chase) and
-  ~22× less than walking `imbl`'s tree. Iteration lands within ~10–30% of
-  a plain `Vec`.
+  ~20× less than walking `imbl`'s tree. Iteration lands within about a
+  third of a plain `Vec`, and ahead of `Vec<Arc<T>>`.
 - **Those read numbers are for a freshly built vector**, whose values sit
   in one chunk in index order. After every element has been replaced in
   scattered order (`cargo bench -- dirty`), random reads are unchanged
@@ -200,8 +200,8 @@ What the numbers actually mean:
   still ahead of an equally scattered `Vec<Arc<T>>` at 3.0 ms, and
   `compact` brings it back to 0.67 ms.
 - **Chained generations** are why `PagedVec` exists. That workload runs
-  7.5× faster than `CowVec` (which recopies the whole pointer table every
-  generation) and 2.5× faster than `imbl`.
+  7× faster than `CowVec` (which recopies the whole pointer table every
+  generation) and 2.2× faster than `imbl`.
 
 Time is the weaker half of the chained-generation story. Keeping 32
 versions of a 1M-element vector alive costs this much memory beyond the
