@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-09-14
 
 ### Added
 
@@ -13,9 +13,9 @@
   `vec.into_iter()` on an owned vector now yields `T` instead of
   auto-referencing to the `&T` iterator; use `vec.iter()` for references.
 - **`CowVector<T>` trait** naming the API both types share (`len`, `get`,
-  `iter`, `push`, `pop`, `set`, `make_mut`, `truncate`, `compact`, and
-  the sharing introspection), so code can be generic over which vector
-  it snapshots.
+  `iter`, `push`, `pop`, `insert`, `remove`, `set`, `make_mut`,
+  `truncate`, `compact`, and the sharing introspection), so code can be
+  generic over which vector it snapshots.
 - `PagedVec::append`, which shares the other vector's pages outright when
   this vector's length is page-aligned and copies pointers otherwise;
   `PagedVec::insert`, `remove`, and `splice`, which rewrite the pages
