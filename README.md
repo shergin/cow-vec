@@ -193,6 +193,12 @@ What the numbers actually mean:
   about the same as through a plain `Vec<Arc<T>>` (one pointer chase) and
   ~22× less than walking `imbl`'s tree. Iteration lands within ~10–30% of
   a plain `Vec`.
+- **Those read numbers are for a freshly built vector**, whose values sit
+  in one chunk in index order. After every element has been replaced in
+  scattered order (`cargo bench -- dirty`), random reads are unchanged
+  (17 µs), but full iteration of 1M elements takes 2.2 ms for both types:
+  still ahead of an equally scattered `Vec<Arc<T>>` at 3.0 ms, and
+  `compact` brings it back to 0.67 ms.
 - **Chained generations** are why `PagedVec` exists. That workload runs
   7.5× faster than `CowVec` (which recopies the whole pointer table every
   generation) and 2.5× faster than `imbl`.

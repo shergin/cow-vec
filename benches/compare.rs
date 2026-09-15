@@ -392,6 +392,105 @@ fn bench_iterate(c: &mut Criterion) {
     group.finish();
 }
 
+/// A deterministic permutation of `0..len`.
+fn permutation(len: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    let mut state = 0x9E3779B97F4A7C15u64;
+    for i in (1..len).rev() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let j = (state >> 33) as usize % (i + 1);
+        order.swap(i, j);
+    }
+    order
+}
+
+/// Reads after heavy editing. The clean read benchmarks above use freshly
+/// built vectors whose values sit in one contiguous chunk in index order;
+/// here every element has been replaced in scattered order, so live values
+/// are spread across arena chunks with no relation to their index. This is
+/// the honest number for a long-lived, much-edited vector, and `compact`
+/// shows what it takes to get the clean number back.
+fn bench_dirty_reads(c: &mut Criterion) {
+    const N: usize = 1_000_000;
+    const READS: usize = 10_000;
+    let order = permutation(N);
+    let indices = scattered_indices(READS, N);
+
+    let mut cow_dirty = CowVec::from(source(N));
+    let mut paged_dirty = PagedVec::<Item>::from(source(N));
+    for &i in &order {
+        cow_dirty.set(i, Item::new(i));
+        paged_dirty.set(i, Item::new(i));
+    }
+    let mut cow_compacted = cow_dirty.clone();
+    cow_compacted.compact(0);
+    // The same scattering applied to a plain Vec<Arc<T>>: each Arc is
+    // allocated in permuted order.
+    let mut arcs: Vec<Option<Arc<Item>>> = vec![None; N];
+    for &i in &order {
+        arcs[i] = Some(Arc::new(Item::new(i)));
+    }
+    let vec_arc_dirty: Vec<Arc<Item>> = arcs.into_iter().map(Option::unwrap).collect();
+
+    let mut group = c.benchmark_group(format!("random_access_dirty_{READS}_of_{N}"));
+    group.sample_size(20);
+    group.bench_function("Vec<Arc>", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &i in &indices {
+                sum = sum.wrapping_add(vec_arc_dirty[i].id);
+            }
+            black_box(sum)
+        })
+    });
+    group.bench_function("CowVec", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &i in &indices {
+                sum = sum.wrapping_add(cow_dirty[i].id);
+            }
+            black_box(sum)
+        })
+    });
+    group.bench_function("PagedVec", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &i in &indices {
+                sum = sum.wrapping_add(paged_dirty[i].id);
+            }
+            black_box(sum)
+        })
+    });
+    group.bench_function("CowVec compacted", |b| {
+        b.iter(|| {
+            let mut sum = 0u64;
+            for &i in &indices {
+                sum = sum.wrapping_add(cow_compacted[i].id);
+            }
+            black_box(sum)
+        })
+    });
+    group.finish();
+
+    let mut group = c.benchmark_group(format!("iterate_dirty_{N}"));
+    group.sample_size(20);
+    group.bench_function("Vec<Arc>", |b| {
+        b.iter(|| black_box(vec_arc_dirty.iter().map(|item| item.id).sum::<u64>()))
+    });
+    group.bench_function("CowVec", |b| {
+        b.iter(|| black_box(cow_dirty.iter().map(|item| item.id).sum::<u64>()))
+    });
+    group.bench_function("PagedVec", |b| {
+        b.iter(|| black_box(paged_dirty.iter().map(|item| item.id).sum::<u64>()))
+    });
+    group.bench_function("CowVec compacted", |b| {
+        b.iter(|| black_box(cow_compacted.iter().map(|item| item.id).sum::<u64>()))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_build,
@@ -401,5 +500,6 @@ criterion_group!(
     bench_chained_generations,
     bench_random_access,
     bench_iterate,
+    bench_dirty_reads,
 );
 criterion_main!(benches);
