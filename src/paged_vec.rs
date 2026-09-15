@@ -347,6 +347,136 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         }
     }
 
+    /// Appends all elements of `other` to this vector by sharing or copying
+    /// pointers.
+    ///
+    /// No element is moved or cloned: this vector's storage additionally
+    /// keeps `other`'s arenas alive. When this vector's length is a
+    /// multiple of `PAGE_SIZE`, `other`'s pages are shared outright and
+    /// the cost is one `Arc` clone per page; otherwise the pointers are
+    /// copied one page at a time. `other` is unaffected.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::PagedVec;
+    ///
+    /// let mut a: PagedVec<i32> = PagedVec::from(vec![1, 2]);
+    /// let b: PagedVec<i32> = PagedVec::from(vec![3, 4]);
+    /// a.append(&b);
+    /// assert_eq!(a, vec![1, 2, 3, 4]);
+    /// assert_eq!(b, vec![3, 4]);
+    /// ```
+    pub fn append(&mut self, other: &Self) {
+        if other.is_empty() {
+            return;
+        }
+        self.storage.absorb(&other.storage);
+        if self.len % PAGE_SIZE == 0 {
+            let other_pages = &other.pages[..other.len.div_ceil(PAGE_SIZE)];
+            let len = self.len + other.len;
+            self.pages_mut().extend(other_pages.iter().cloned());
+            self.len = len;
+        } else {
+            let ptrs: Vec<*const T> = other.ptrs().collect();
+            self.extend_ptrs(ptrs);
+        }
+    }
+
+    /// Swaps two elements.
+    ///
+    /// Copies the touched page or pages if they are shared.
+    ///
+    /// # Panics
+    /// Panics if either index is out of bounds.
+    pub fn swap(&mut self, a: usize, b: usize) {
+        assert!(a < self.len && b < self.len, "index out of bounds");
+        if a == b {
+            return;
+        }
+        let (page_a, slot_a) = Self::split(a);
+        let (page_b, slot_b) = Self::split(b);
+        let pages = self.pages_mut();
+        if page_a == page_b {
+            Arc::make_mut(&mut pages[page_a]).slots.swap(slot_a, slot_b);
+        } else {
+            let ptr_a = pages[page_a].slots[slot_a];
+            let ptr_b = pages[page_b].slots[slot_b];
+            Arc::make_mut(&mut pages[page_a]).slots[slot_a] = ptr_b;
+            Arc::make_mut(&mut pages[page_b]).slots[slot_b] = ptr_a;
+        }
+    }
+
+    /// Sorts the vector with a comparator function (stable).
+    ///
+    /// Only pointers are reordered; elements are never moved or cloned.
+    /// Every page is rewritten, so a vector that shares pages with clones
+    /// copies all of them, the same cost as `CowVec`'s first write.
+    pub fn sort_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&T, &T) -> std::cmp::Ordering,
+    {
+        // SAFETY (all sort methods): pointers are valid for the arena's
+        // lifetime; see get().
+        self.permute(|ptrs| ptrs.sort_by(|a, b| compare(unsafe { &**a }, unsafe { &**b })));
+    }
+
+    /// Sorts the vector (stable). See [`sort_by`](Self::sort_by).
+    pub fn sort(&mut self)
+    where
+        T: Ord,
+    {
+        self.sort_by(T::cmp);
+    }
+
+    /// Sorts the vector with a key extraction function (stable).
+    /// See [`sort_by`](Self::sort_by).
+    pub fn sort_by_key<K, F>(&mut self, mut key: F)
+    where
+        K: Ord,
+        F: FnMut(&T) -> K,
+    {
+        self.permute(|ptrs| ptrs.sort_by_key(|ptr| key(unsafe { &**ptr })));
+    }
+
+    /// Sorts the vector with a comparator function (unstable).
+    /// See [`sort_by`](Self::sort_by).
+    pub fn sort_unstable_by<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(&T, &T) -> std::cmp::Ordering,
+    {
+        self.permute(|ptrs| {
+            ptrs.sort_unstable_by(|a, b| compare(unsafe { &**a }, unsafe { &**b }))
+        });
+    }
+
+    /// Sorts the vector (unstable). See [`sort_by`](Self::sort_by).
+    pub fn sort_unstable(&mut self)
+    where
+        T: Ord,
+    {
+        self.sort_unstable_by(T::cmp);
+    }
+
+    /// The pointer of every element, in order.
+    fn ptrs(&self) -> impl Iterator<Item = *const T> + '_ {
+        (0..self.len).map(|index| {
+            let (page, slot) = Self::split(index);
+            self.pages[page].slots[slot]
+        })
+    }
+
+    /// Reorders the elements by gathering every pointer, letting `f`
+    /// rearrange them, and writing them back page by page.
+    fn permute(&mut self, f: impl FnOnce(&mut Vec<*const T>)) {
+        let mut ptrs: Vec<*const T> = self.ptrs().collect();
+        f(&mut ptrs);
+        debug_assert_eq!(ptrs.len(), self.len);
+        let pages = self.pages_mut();
+        for (page, chunk) in ptrs.chunks(PAGE_SIZE).enumerate() {
+            Arc::make_mut(&mut pages[page]).slots[..chunk.len()].copy_from_slice(chunk);
+        }
+    }
+
     /// Bulk-appends pointers, filling pages chunk by chunk.
     fn extend_ptrs(&mut self, ptrs: Vec<*const T>) {
         let mut len = self.len;
@@ -416,13 +546,7 @@ impl<T: Clone, const N: usize> PagedVec<T, N> {
         }
         let values = match Arc::get_mut(&mut self.pages) {
             Some(_) => {
-                let pages = &self.pages;
-                let ptrs: Vec<*const T> = (0..self.len)
-                    .map(|index| {
-                        let (page, slot) = Self::split(index);
-                        pages[page].slots[slot]
-                    })
-                    .collect();
+                let ptrs: Vec<*const T> = self.ptrs().collect();
                 self.storage.take_all(&ptrs)
             }
             None => None,

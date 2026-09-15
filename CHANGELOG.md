@@ -7,6 +7,11 @@
 - **`compact(max_allocations)`** on both types: rebuilds the storage in
   place, moving the elements when nothing else references it and cloning
   them otherwise. `clone_compacted` still always clones.
+- `PagedVec::append`, which shares the other vector's pages outright when
+  this vector's length is page-aligned and copies pointers otherwise;
+  `PagedVec::swap`; and the `sort`/`sort_by`/`sort_by_key`/
+  `sort_unstable`/`sort_unstable_by` family on `PagedVec`, all reordering
+  pointers only.
 
 ### Changed
 

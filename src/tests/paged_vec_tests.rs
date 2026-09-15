@@ -125,6 +125,112 @@ fn stale_pages_after_shared_truncate_are_released_on_write() {
 }
 
 #[test]
+fn append_shares_pages_when_aligned_and_copies_otherwise() {
+    let b: SmallPaged<i32> = (100..120).collect(); // 3 pages, last one partial
+
+    let mut a: SmallPaged<i32> = (0..16).collect(); // exactly 2 pages
+    a.append(&b);
+    assert_eq!(a.len(), 36);
+    assert_eq!(a.to_vec(), (0..16).chain(100..120).collect::<Vec<_>>());
+    for page in 0..3 {
+        assert_eq!(a.page_addr(2 + page), b.page_addr(page), "page shared");
+    }
+    // Writing into a shared page still copies it, not b's.
+    a.set(17, -1);
+    assert_ne!(a.page_addr(2), b.page_addr(0));
+    assert_eq!(b[1], 101);
+    // Pushing after a shared partial page copies that page first.
+    a.push(7);
+    assert_eq!(a[36], 7);
+    assert_eq!(b.to_vec(), (100..120).collect::<Vec<_>>());
+
+    let mut c: SmallPaged<i32> = (0..5).collect(); // partial page: pointer copy
+    c.append(&b);
+    assert_eq!(c.to_vec(), (0..5).chain(100..120).collect::<Vec<_>>());
+    assert_ne!(c.page_addr(0), b.page_addr(0));
+
+    let mut empty: SmallPaged<i32> = PagedVec::new();
+    empty.append(&b);
+    assert_eq!(empty, b);
+    let before = empty.len();
+    empty.append(&PagedVec::new());
+    assert_eq!(empty.len(), before);
+}
+
+#[test]
+fn append_of_related_vector_clones_until_compacted() {
+    use crate::tests::shared_suite::Counters;
+    let counters = Counters::new();
+    let mut v: SmallPaged<_> = PagedVec::from(vec![counters.tracked(1)]);
+    let twin = v.clone();
+    v.append(&twin);
+    drop(twin);
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(counters.clones(), 1, "the same value sits at two indices");
+    v.compact(0);
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(
+        counters.clones(),
+        2,
+        "compaction cloned once; pop then moved"
+    );
+}
+
+#[test]
+fn sort_permutes_pointers_across_pages() {
+    let n = 45; // 6 pages, last one partial
+    let v1: SmallPaged<i32> = (0..n).rev().collect();
+    let mut v2 = v1.clone();
+    v2.sort();
+    assert_eq!(v2.to_vec(), (0..n).collect::<Vec<_>>());
+    assert_eq!(v1.to_vec(), (0..n).rev().collect::<Vec<_>>());
+    assert_eq!(
+        v2.storage_allocations(),
+        n as usize,
+        "no element was cloned"
+    );
+
+    // Stable: equal keys keep their order.
+    let mut v3: SmallPaged<(i32, i32)> = (0..20).map(|i| (i % 3, i)).collect();
+    v3.sort_by_key(|&(k, _)| k);
+    let mut expected: Vec<(i32, i32)> = (0..20).map(|i| (i % 3, i)).collect();
+    expected.sort_by_key(|&(k, _)| k);
+    assert_eq!(v3.to_vec(), expected);
+
+    let mut v4: SmallPaged<i32> = (0..n).rev().collect();
+    v4.sort_unstable_by(|a, b| b.cmp(a).reverse());
+    assert_eq!(v4.to_vec(), (0..n).collect::<Vec<_>>());
+    v4.sort_unstable();
+    assert_eq!(v4.to_vec(), (0..n).collect::<Vec<_>>());
+}
+
+#[test]
+fn swap_within_and_across_pages() {
+    let v1: SmallPaged<i32> = (0..20).collect();
+    let mut v2 = v1.clone();
+    v2.swap(1, 2); // same page
+    v2.swap(3, 17); // pages 0 and 2
+    v2.swap(5, 5);
+    assert_eq!(v2[1], 2);
+    assert_eq!(v2[2], 1);
+    assert_eq!(v2[3], 17);
+    assert_eq!(v2[17], 3);
+    assert_eq!(v1.to_vec(), (0..20).collect::<Vec<_>>());
+    assert_eq!(
+        v1.page_addr(1),
+        v2.page_addr(1),
+        "untouched page still shared"
+    );
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn swap_out_of_bounds_panics() {
+    let mut v: SmallPaged<i32> = (0..3).collect();
+    v.swap(0, 3);
+}
+
+#[test]
 fn make_mut_diverges_one_page() {
     let v1: SmallPaged<String> = (0..16).map(|i| i.to_string()).collect();
     let mut v2 = v1.clone();
