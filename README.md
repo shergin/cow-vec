@@ -17,7 +17,7 @@ what happens the first time a clone writes:
 | First mutation after clone | copies the whole pointer array | copies the root table + touched pages |
 | Diverge 50 elements of 4M | ~32 MB copied | ~0.4 MB copied |
 | Indexed access | 1 pointer hop | 2 pointer hops (root stays in cache) |
-| `pop` / `truncate` after clone | copies pointer array once | copies nothing |
+| `pop` / `truncate` after clone | copies the kept prefix (`clear`: nothing) | copies nothing |
 | Extras | `sort`/`dedup`/`binary_search`, `append`, `split_off`, `splice`, `as_slice` | core API |
 
 **CowVec** is the one you want when clones rarely write — or they rewrite
@@ -156,7 +156,7 @@ chain.
 | `get()` / `[i]` | O(1), 1 hop | O(1), 2 hops |
 | `push()` | O(1) amortized, no lock | O(1) amortized, no lock |
 | `set()` | O(1) + COW | O(1) + page COW |
-| `pop()` / `truncate()` | O(1) + COW | O(1), copies nothing |
+| `pop()` / `truncate(k)` / `clear()` | O(1); O(k) prefix copy if shared | O(1), copies nothing |
 | `sort_*()` | O(n log n) pointer swaps | — |
 | `append()` | O(m) pointer copies | — |
 | bulk build (`from`/`collect`) | one allocation batch, values contiguous | same |

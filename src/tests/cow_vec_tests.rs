@@ -327,6 +327,37 @@ fn test_clear() {
 }
 
 #[test]
+fn shared_truncate_clear_retain_keep_working_afterwards() {
+    // The shared paths build a fresh, private table; make sure it is a
+    // fully functional one.
+    let base = CowVec::from((0..10).collect::<Vec<i32>>());
+
+    let mut t = base.clone();
+    t.truncate(4);
+    t.push(100);
+    assert_eq!(t.to_vec(), vec![0, 1, 2, 3, 100]);
+    assert!(!t.is_structure_shared());
+
+    let mut c = base.clone();
+    c.clear();
+    c.push(7);
+    assert_eq!(c.to_vec(), vec![7]);
+
+    let mut r = base.clone();
+    r.retain(|x| x % 3 == 0);
+    r.push(-1);
+    assert_eq!(r.to_vec(), vec![0, 3, 6, 9, -1]);
+
+    // Truncating to the current length or beyond does not even diverge.
+    let mut n = base.clone();
+    n.truncate(10);
+    n.truncate(50);
+    assert!(n.is_structure_shared());
+
+    assert_eq!(base.to_vec(), (0..10).collect::<Vec<i32>>());
+}
+
+#[test]
 fn test_clear_does_not_affect_clones() {
     let vec1 = CowVec::from(vec![1, 2, 3]);
     let mut vec2 = vec1.clone();

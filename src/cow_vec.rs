@@ -339,19 +339,32 @@ impl<T> CowVec<T> {
 
     /// Shortens the vector, keeping the first `len` elements.
     ///
-    /// If `len` is greater than or equal to the current length, this has no effect.
+    /// If `len` is greater than or equal to the current length, this has no
+    /// effect. When the pointer table is shared with clones, only the kept
+    /// prefix is copied, not the whole table.
     ///
     /// Note: Removed values remain in the shared arena.
     pub fn truncate(&mut self, len: usize) {
-        self.items_mut().truncate(len);
+        if len >= self.items.len() {
+            return;
+        }
+        match Arc::get_mut(&mut self.items) {
+            Some(items) => items.truncate(len),
+            None => self.items = Arc::new(self.items[..len].to_vec()),
+        }
     }
 
     /// Clears the vector, removing all elements.
     ///
+    /// Copies nothing, even when the pointer table is shared with clones.
+    ///
     /// Note: Values remain in the shared arena but are no longer
     /// accessible through this `CowVec` instance.
     pub fn clear(&mut self) {
-        self.items_mut().clear();
+        match Arc::get_mut(&mut self.items) {
+            Some(items) => items.clear(),
+            None => self.items = Arc::new(Vec::new()),
+        }
     }
 
     /// Inserts an element at position `index`, shifting all elements after it to the right.
@@ -374,7 +387,9 @@ impl<T> CowVec<T> {
 
     /// Retains only the elements specified by the predicate.
     ///
-    /// Removes all elements for which the predicate returns `false`.
+    /// Removes all elements for which the predicate returns `false`. When
+    /// the pointer table is shared with clones, only the kept pointers are
+    /// copied.
     ///
     /// Note: Removed values remain in the shared arena.
     ///
@@ -390,11 +405,19 @@ impl<T> CowVec<T> {
     where
         F: FnMut(&T) -> bool,
     {
-        self.items_mut().retain(|ptr| {
-            // SAFETY: Pointer is valid for arena's lifetime
-            let value = unsafe { &**ptr };
-            f(value)
-        });
+        // SAFETY (both arms): pointers are valid for the arena's lifetime.
+        match Arc::get_mut(&mut self.items) {
+            Some(items) => items.retain(|ptr| f(unsafe { &**ptr })),
+            None => {
+                let kept: Vec<*const T> = self
+                    .items
+                    .iter()
+                    .copied()
+                    .filter(|ptr| f(unsafe { &**ptr }))
+                    .collect();
+                self.items = Arc::new(kept);
+            }
+        }
     }
 
     /// Splits the vector into two at the given index.
