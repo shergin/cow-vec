@@ -7,6 +7,10 @@
 - **`compact(max_allocations)`** on both types: rebuilds the storage in
   place, moving the elements when nothing else references it and cloning
   them otherwise. `clone_compacted` still always clones.
+- **`CowVector<T>` trait** naming the API both types share (`len`, `get`,
+  `iter`, `push`, `pop`, `set`, `make_mut`, `truncate`, `compact`, and
+  the sharing introspection), so code can be generic over which vector
+  it snapshots.
 - `PagedVec::append`, which shares the other vector's pages outright when
   this vector's length is page-aligned and copies pointers otherwise;
   `PagedVec::swap`; and the `sort`/`sort_by`/`sort_by_key`/

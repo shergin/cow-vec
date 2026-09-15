@@ -23,7 +23,9 @@ what happens the first time a clone writes:
 **CowVec** is the one you want when clones rarely write — or they rewrite
 everything at once — and most of the time you are just reading. **PagedVec**
 is for the other life: you keep deriving new versions from old ones.
-Version chains, undo history, branch-and-discard search.
+Version chains, undo history, branch-and-discard search. Code that does
+not want to decide can be generic over the **`CowVector`** trait, which
+names the API the two have in common.
 
 ## Quick start
 

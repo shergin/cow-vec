@@ -6,10 +6,12 @@ mod paged_vec;
 #[cfg(feature = "serde")]
 mod serde_impls;
 mod storage;
+mod traits;
 
 pub use cow_vec::CowVec;
 pub use iterator::CowVecIter;
 pub use paged_vec::{PagedVec, PagedVecIter};
+pub use traits::CowVector;
 
 #[cfg(test)]
 #[path = "tests"]
@@ -18,4 +20,5 @@ mod tests {
 
     mod cow_vec_tests;
     mod paged_vec_tests;
+    mod trait_tests;
 }
