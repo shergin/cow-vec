@@ -145,6 +145,68 @@ fn nth_skips_pages() {
 }
 
 #[test]
+fn iterator_ends_meet_inside_a_page() {
+    let v: SmallPaged<usize> = (0..20).collect(); // pages 0-7, 8-15, 16-19
+    let mut it = v.iter();
+    assert_eq!(it.next(), Some(&0));
+    assert_eq!(it.next_back(), Some(&19));
+    assert_eq!(it.nth(8), Some(&9)); // front jumps into page 1
+    assert_eq!(it.nth_back(8), Some(&10)); // back lands on page 1 too
+    assert_eq!(it.len(), 0);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next_back(), None);
+
+    // Alternating ends inside one page never yield an element twice.
+    let mut it = v.iter();
+    let mut seen = Vec::new();
+    while let Some(x) = it.next() {
+        seen.push(*x);
+        match it.next_back() {
+            Some(x) => seen.push(*x),
+            None => break,
+        }
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (0..20).collect::<Vec<_>>());
+}
+
+#[test]
+fn iterator_fold_paths_match_next() {
+    for n in [0, 1, 7, 8, 9, 16, 17, 40] {
+        let v: SmallPaged<usize> = (0..n).collect();
+        let expected: Vec<usize> = (0..n).collect();
+
+        assert_eq!(v.iter().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            v.iter().copied().sum::<usize>(),
+            expected.iter().sum::<usize>()
+        );
+        assert_eq!(
+            v.iter().rev().copied().collect::<Vec<_>>(),
+            expected.iter().rev().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(v.iter().count(), n);
+        assert_eq!(v.iter().last(), expected.last());
+
+        // Partially consumed from both ends, then folded either way.
+        let inner: Vec<usize> = expected
+            .iter()
+            .skip(1)
+            .take(n.saturating_sub(2))
+            .copied()
+            .collect();
+        let mut it = v.iter();
+        it.next();
+        it.next_back();
+        assert_eq!(it.clone().copied().collect::<Vec<_>>(), inner);
+        assert_eq!(
+            it.rev().copied().collect::<Vec<_>>(),
+            inner.iter().rev().copied().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn chained_generations_diverge_page_by_page() {
     // The driving workload in miniature: each generation replaces a few
     // scattered elements; every version stays intact.

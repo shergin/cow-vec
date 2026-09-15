@@ -309,9 +309,13 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
     /// Returns an iterator over references to the elements.
     pub fn iter(&self) -> PagedVecIter<'_, T, PAGE_SIZE> {
         PagedVecIter {
-            vec: self,
+            pages: &self.pages,
             front: 0,
             back: self.len,
+            front_page: usize::MAX,
+            front_slots: None,
+            back_page: usize::MAX,
+            back_slots: None,
         }
     }
 
@@ -492,11 +496,54 @@ impl<T, const N: usize> Index<usize> for PagedVec<T, N> {
 }
 
 /// An iterator over the elements of a `PagedVec`.
+///
+/// Walks the pointer pages directly: crossing into a page costs one root
+/// table lookup, and every element inside it is then a plain array index.
 pub struct PagedVecIter<'a, T, const PAGE_SIZE: usize> {
-    vec: &'a PagedVec<T, PAGE_SIZE>,
+    pages: &'a [Arc<Page<T, PAGE_SIZE>>],
     front: usize,
     /// Exclusive.
     back: usize,
+    /// Index of the page cached in `front_slots`; `usize::MAX` when none.
+    front_page: usize,
+    front_slots: Option<&'a [*const T; PAGE_SIZE]>,
+    /// Index of the page cached in `back_slots`; `usize::MAX` when none.
+    back_page: usize,
+    back_slots: Option<&'a [*const T; PAGE_SIZE]>,
+}
+
+impl<'a, T, const N: usize> PagedVecIter<'a, T, N> {
+    /// Pointer at `index`, going through the front page cache.
+    #[inline]
+    fn front_ptr(&mut self, index: usize) -> *const T {
+        let (page, slot) = PagedVec::<T, N>::split(index);
+        let slots = match self.front_slots {
+            Some(slots) if page == self.front_page => slots,
+            _ => {
+                let slots = &self.pages[page].slots;
+                self.front_page = page;
+                self.front_slots = Some(slots);
+                slots
+            }
+        };
+        slots[slot]
+    }
+
+    /// Pointer at `index`, going through the back page cache.
+    #[inline]
+    fn back_ptr(&mut self, index: usize) -> *const T {
+        let (page, slot) = PagedVec::<T, N>::split(index);
+        let slots = match self.back_slots {
+            Some(slots) if page == self.back_page => slots,
+            _ => {
+                let slots = &self.pages[page].slots;
+                self.back_page = page;
+                self.back_slots = Some(slots);
+                slots
+            }
+        };
+        slots[slot]
+    }
 }
 
 impl<'a, T, const N: usize> Iterator for PagedVecIter<'a, T, N> {
@@ -505,9 +552,11 @@ impl<'a, T, const N: usize> Iterator for PagedVecIter<'a, T, N> {
     #[inline]
     fn next(&mut self) -> Option<&'a T> {
         if self.front < self.back {
-            let item = self.vec.get(self.front);
+            let ptr = self.front_ptr(self.front);
             self.front += 1;
-            item
+            // SAFETY: In-bounds slot of the borrowed vector; see
+            // PagedVec::get.
+            Some(unsafe { &*ptr })
         } else {
             None
         }
@@ -524,6 +573,34 @@ impl<'a, T, const N: usize> Iterator for PagedVecIter<'a, T, N> {
         self.front = self.front.saturating_add(n).min(self.back);
         self.next()
     }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.back - self.front
+    }
+
+    #[inline]
+    fn last(mut self) -> Option<&'a T> {
+        self.next_back()
+    }
+
+    /// Runs page by page, so the inner loop is a plain slice walk.
+    fn fold<B, F>(mut self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a T) -> B,
+    {
+        let mut acc = init;
+        while self.front < self.back {
+            let (page, slot) = PagedVec::<T, N>::split(self.front);
+            let end = (self.back - page * N).min(N);
+            for &ptr in &self.pages[page].slots[slot..end] {
+                // SAFETY: As in next().
+                acc = f(acc, unsafe { &*ptr });
+            }
+            self.front += end - slot;
+        }
+        acc
+    }
 }
 
 impl<'a, T, const N: usize> DoubleEndedIterator for PagedVecIter<'a, T, N> {
@@ -531,10 +608,36 @@ impl<'a, T, const N: usize> DoubleEndedIterator for PagedVecIter<'a, T, N> {
     fn next_back(&mut self) -> Option<&'a T> {
         if self.front < self.back {
             self.back -= 1;
-            self.vec.get(self.back)
+            let ptr = self.back_ptr(self.back);
+            // SAFETY: As in next().
+            Some(unsafe { &*ptr })
         } else {
             None
         }
+    }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<&'a T> {
+        self.back = self.back.saturating_sub(n).max(self.front);
+        self.next_back()
+    }
+
+    /// Runs page by page from the back; see `fold`.
+    fn rfold<B, F>(mut self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, &'a T) -> B,
+    {
+        let mut acc = init;
+        while self.front < self.back {
+            let (page, end_slot) = PagedVec::<T, N>::split(self.back - 1);
+            let start = self.front.saturating_sub(page * N);
+            for &ptr in self.pages[page].slots[start..=end_slot].iter().rev() {
+                // SAFETY: As in next().
+                acc = f(acc, unsafe { &*ptr });
+            }
+            self.back -= end_slot + 1 - start;
+        }
+        acc
     }
 }
 
@@ -549,11 +652,7 @@ impl<T, const N: usize> FusedIterator for PagedVecIter<'_, T, N> {}
 
 impl<T, const N: usize> Clone for PagedVecIter<'_, T, N> {
     fn clone(&self) -> Self {
-        Self {
-            vec: self.vec,
-            front: self.front,
-            back: self.back,
-        }
+        Self { ..*self }
     }
 }
 
