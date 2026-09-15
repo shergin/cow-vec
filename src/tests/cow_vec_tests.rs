@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use crate::tests::shared_suite::Counters;
 use crate::CowVec;
 
 #[test]
@@ -355,6 +356,82 @@ fn shared_truncate_clear_retain_keep_working_afterwards() {
     assert!(n.is_structure_shared());
 
     assert_eq!(base.to_vec(), (0..10).collect::<Vec<i32>>());
+}
+
+#[test]
+fn append_of_related_vector_disables_moves_until_compacted() {
+    let counters = Counters::new();
+    let mut v = CowVec::from(vec![counters.tracked(1)]);
+    let twin = v.clone();
+    v.append(&twin); // the same value now sits at index 0 and 1
+    drop(twin);
+
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(counters.clones(), 1, "aliased storage must clone");
+    assert_eq!(v[0].value, 1);
+
+    v.compact(0);
+    assert_eq!(
+        counters.clones(),
+        2,
+        "aliased storage is rebuilt by cloning"
+    );
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(counters.clones(), 2, "fresh storage owns its values again");
+}
+
+#[test]
+fn append_of_unrelated_vector_keeps_moves_once_it_is_gone() {
+    let counters = Counters::new();
+    let mut v = CowVec::from(vec![counters.tracked(1)]);
+    let other = CowVec::from(vec![counters.tracked(2)]);
+    v.append(&other);
+
+    // `other` still owns its arena, so its value has to be cloned out.
+    assert_eq!(v.pop().map(|t| t.value), Some(2));
+    assert_eq!(counters.clones(), 1);
+
+    drop(other);
+    v.push(counters.tracked(3));
+    assert_eq!(v.pop().map(|t| t.value), Some(3));
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(counters.clones(), 1, "everything moved once other was gone");
+}
+
+#[test]
+fn split_off_shares_storage_until_one_side_is_gone() {
+    let counters = Counters::new();
+    let mut v = CowVec::from((0..4).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+    let tail = v.split_off(2);
+    assert_eq!(v.pop().map(|t| t.value), Some(1));
+    assert_eq!(counters.clones(), 1);
+    drop(tail);
+    assert_eq!(v.pop().map(|t| t.value), Some(0));
+    assert_eq!(counters.clones(), 1);
+}
+
+#[test]
+fn remove_splice_retain_dedup_move_or_drop_when_owned() {
+    let counters = Counters::new();
+    let mut v = CowVec::from((0..6).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+    assert_eq!(v.remove(0).value, 0);
+    let removed = v.splice(0..2, [counters.tracked(10)]);
+    assert_eq!(
+        removed.iter().map(|t| t.value).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    drop(removed);
+    assert_eq!(counters.drops(), 3);
+    v.retain(|t| t.value != 3);
+    assert_eq!(counters.drops(), 4);
+    v.push(counters.tracked(5));
+    v.dedup();
+    assert_eq!(counters.drops(), 5);
+    assert_eq!(
+        v.iter().map(|t| t.value).collect::<Vec<_>>(),
+        vec![10, 4, 5]
+    );
+    assert_eq!(counters.clones(), 0);
 }
 
 #[test]

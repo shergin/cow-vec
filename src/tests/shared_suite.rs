@@ -11,6 +11,7 @@ macro_rules! shared_vec_tests {
             use std::thread;
 
             use super::$V;
+            use crate::tests::shared_suite::Counters;
 
             #[test]
             fn new_is_empty() {
@@ -263,6 +264,120 @@ macro_rules! shared_vec_tests {
             }
 
             #[test]
+            fn pop_moves_when_storage_is_owned() {
+                let counters = Counters::new();
+                let mut v = $V::from(vec![counters.tracked(1), counters.tracked(2)]);
+                assert_eq!(v.pop().map(|t| t.value), Some(2));
+                assert_eq!(counters.clones(), 0, "sole owner moves, never clones");
+                assert_eq!(counters.drops(), 1, "the moved value was dropped by us");
+
+                let snapshot = v.clone();
+                assert_eq!(v.pop().map(|t| t.value), Some(1));
+                assert_eq!(counters.clones(), 1, "a live clone forces a copy");
+                assert_eq!(snapshot[0].value, 1);
+                assert_eq!(counters.drops(), 2);
+            }
+
+            #[test]
+            fn set_drops_replaced_value_when_owned() {
+                let counters = Counters::new();
+                let mut v = $V::from(vec![counters.tracked(1)]);
+                v.set(0, counters.tracked(2));
+                assert_eq!(counters.drops(), 1);
+
+                let snapshot = v.clone();
+                v.set(0, counters.tracked(3));
+                assert_eq!(counters.drops(), 1, "the snapshot still sees the old value");
+                assert_eq!(snapshot[0].value, 2);
+                drop(snapshot);
+                drop(v);
+                assert_eq!(counters.drops(), 3);
+            }
+
+            #[test]
+            fn ownership_returns_when_siblings_die() {
+                let counters = Counters::new();
+                let v1 = $V::from(vec![counters.tracked(1), counters.tracked(2)]);
+                let mut v2 = v1.clone();
+                v2.set(0, counters.tracked(10)); // diverge: v1's arena is frozen in v2
+                assert!(v2.is_storage_shared());
+                drop(v1);
+                // The next mutation takes the frozen ancestor back, so its
+                // values can be moved out again.
+                assert_eq!(v2.pop().map(|t| t.value), Some(2));
+                assert_eq!(counters.clones(), 0);
+                assert!(!v2.is_storage_shared());
+                assert_eq!(v2.pop().map(|t| t.value), Some(10));
+                assert_eq!(counters.clones(), 0);
+            }
+
+            #[test]
+            fn make_mut_is_in_place_when_owned() {
+                let counters = Counters::new();
+                let mut v = $V::from(vec![counters.tracked(1)]);
+                let before = v.storage_allocations();
+                v.make_mut(0).value = 5;
+                assert_eq!(v.storage_allocations(), before, "no fresh slot needed");
+                assert_eq!(counters.clones(), 0);
+                assert_eq!(v[0].value, 5);
+
+                let snapshot = v.clone();
+                v.make_mut(0).value = 6;
+                assert_eq!(counters.clones(), 1);
+                assert_eq!(snapshot[0].value, 5);
+                assert_eq!(v[0].value, 6);
+            }
+
+            #[test]
+            fn compact_moves_when_owned_and_clones_otherwise() {
+                let counters = Counters::new();
+                let mut v = $V::from(vec![counters.tracked(1), counters.tracked(2)]);
+                for i in 0..10 {
+                    v.set(0, counters.tracked(i));
+                }
+                assert_eq!(v.storage_allocations(), 12);
+                assert_eq!(counters.drops(), 10, "replaced values dropped as they went");
+
+                v.compact(5);
+                assert_eq!(v.storage_allocations(), 2);
+                assert_eq!(counters.clones(), 0, "sole owner moves into fresh storage");
+                assert_eq!(counters.drops(), 10, "nothing live was dropped");
+                assert_eq!(v.iter().map(|t| t.value).collect::<Vec<_>>(), vec![9, 2]);
+
+                // Under the limit: nothing happens.
+                v.compact(5);
+                assert_eq!(v.storage_allocations(), 2);
+
+                // Shared: the elements have to be cloned.
+                let snapshot = v.clone();
+                v.set(1, counters.tracked(20));
+                v.compact(0);
+                assert_eq!(counters.clones(), 2);
+                assert_eq!(v.storage_allocations(), 2);
+                assert_eq!(v.iter().map(|t| t.value).collect::<Vec<_>>(), vec![9, 20]);
+                assert_eq!(
+                    snapshot.iter().map(|t| t.value).collect::<Vec<_>>(),
+                    vec![9, 2]
+                );
+            }
+
+            #[test]
+            fn truncate_and_clear_drop_when_owned() {
+                let counters = Counters::new();
+                let mut v = $V::from((0..5).map(|i| counters.tracked(i)).collect::<Vec<_>>());
+                v.truncate(3);
+                assert_eq!(counters.drops(), 2);
+
+                let snapshot = v.clone();
+                v.clear();
+                assert_eq!(counters.drops(), 2, "the snapshot still sees the values");
+                assert_eq!(snapshot.len(), 3);
+                drop(snapshot);
+                drop(v);
+                assert_eq!(counters.drops(), 5);
+            }
+
+            #[test]
             fn storage_sharing_is_reported() {
                 let v1 = $V::from(vec![1, 2, 3]);
                 assert!(!v1.is_storage_shared());
@@ -336,3 +451,64 @@ macro_rules! shared_vec_tests {
 }
 
 pub(crate) use shared_vec_tests;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+/// Tallies for [`Tracked`] values, so a test can tell a move from a clone
+/// and see exactly when a value is dropped.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Counters {
+    clones: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl Counters {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn tracked(&self, value: i32) -> Tracked {
+        Tracked {
+            value,
+            counters: self.clone(),
+        }
+    }
+
+    pub(crate) fn clones(&self) -> usize {
+        self.clones.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn drops(&self) -> usize {
+        self.drops.load(Ordering::SeqCst)
+    }
+}
+
+/// A value that reports its clones and drops to its [`Counters`].
+#[derive(Debug)]
+pub(crate) struct Tracked {
+    pub(crate) value: i32,
+    counters: Counters,
+}
+
+impl Clone for Tracked {
+    fn clone(&self) -> Self {
+        self.counters.clones.fetch_add(1, Ordering::SeqCst);
+        Self {
+            value: self.value,
+            counters: self.counters.clone(),
+        }
+    }
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.counters.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl PartialEq for Tracked {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}

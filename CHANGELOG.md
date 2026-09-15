@@ -2,8 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- **`compact(max_allocations)`** on both types: rebuilds the storage in
+  place, moving the elements when nothing else references it and cloning
+  them otherwise. `clone_compacted` still always clones.
+
 ### Changed
 
+- **A sole owner moves and drops values.** When no clone or ancestor
+  shares the storage, `pop`, `remove`, and `splice` move values out
+  instead of cloning them; `set`, `truncate`, `clear`, `retain`, and
+  `dedup` drop the replaced values immediately; and `make_mut` returns
+  the slot in place without allocating. Shared storage behaves as before.
+- **Dead ancestors are reclaimed.** A vector that outlives its clones
+  takes their arenas back on its next mutation, so `is_storage_shared`
+  turns `false` again instead of staying `true` forever, and values from
+  those arenas can be moved like any other.
 - **Storage no longer depends on `typed-arena`.** Values live in a
   private chunk list that is only ever mutated through `Arc::get_mut`,
   so the hand-written `Sync` impl on the arena is gone; the remaining

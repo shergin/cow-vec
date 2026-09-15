@@ -51,6 +51,12 @@ unsafe impl<T: Send + Sync, const N: usize> Sync for Page<T, N> {}
 /// elements with the default page size, diverging 50 scattered elements
 /// copies ~430 KB instead of 32 MB.
 ///
+/// Values are shared with clones through the same storage as
+/// [`CowVec`](crate::CowVec), with the same ownership rule: once nothing
+/// else references the storage, `pop` moves values out, `set` and
+/// `truncate` drop replaced values on the spot, and `make_mut` hands out
+/// the slot itself.
+///
 /// The cost is one extra pointer hop on access compared to `CowVec`:
 /// root table entry, then page slot, then value. The root table is small
 /// (8 bytes per 1024 elements) and stays cache-resident, so indexed access
@@ -158,7 +164,7 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
     }
 
     /// Returns `true` if the storage (arenas with actual values) may be
-    /// shared with other clones. Conservative, like
+    /// shared with other clones. Conservative between mutations, like
     /// [`CowVec::is_storage_shared`](crate::CowVec::is_storage_shared).
     pub fn is_storage_shared(&self) -> bool {
         self.storage.is_shared()
@@ -206,7 +212,9 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
     ///
     /// Allocates the new value in this instance's storage and rewrites one
     /// pointer, copying the root table and the touched page only if they
-    /// are shared. Other clones keep seeing the original value.
+    /// are shared. Other clones keep seeing the original value. The
+    /// replaced value is dropped right away if nothing else references
+    /// this vector's storage, and stays in the shared arena otherwise.
     ///
     /// # Panics
     /// Panics if `index >= len()`.
@@ -217,10 +225,12 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
                 self.len, index
             );
         }
-        let ptr = self.storage.alloc(value);
         let (page, slot) = Self::split(index);
+        let old = self.pages[page].slots[slot];
+        let ptr = self.storage.alloc(value);
         let pages = self.pages_mut();
         Arc::make_mut(&mut pages[page]).slots[slot] = ptr;
+        self.storage.release([old]);
     }
 
     /// Returns a mutable reference to the element at `index`, first copying
@@ -240,8 +250,15 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
             );
         }
         let (page, slot) = Self::split(index);
+        let ptr = self.pages[page].slots[slot];
+        // Fast path: the table and the value are ours alone. (Checked
+        // separately from the use below to satisfy the borrow checker.)
+        let owned = Arc::get_mut(&mut self.pages).is_some() && self.storage.get_mut(ptr).is_some();
+        if owned {
+            return self.storage.get_mut(ptr).expect("checked above");
+        }
         // SAFETY: In-bounds slot; see get().
-        let current = unsafe { &*self.pages[page].slots[slot] }.clone();
+        let current = unsafe { &*ptr }.clone();
         let ptr = self.storage.alloc(current);
         let pages = self.pages_mut();
         Arc::make_mut(&mut pages[page]).slots[slot] = ptr;
@@ -252,10 +269,11 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
 
     /// Removes the last element and returns it, or `None` if empty.
     ///
-    /// This is O(1) and copies nothing: only the length shrinks. The value
-    /// is cloned out of the shared storage, where the original stays
-    /// allocated. To drop elements without `T: Clone`, use
-    /// [`truncate`](Self::truncate).
+    /// This is O(1) and copies no pointers: only the length shrinks. The
+    /// value is moved out when nothing else references this vector's
+    /// storage, and cloned otherwise, with the original staying allocated
+    /// for the clones that may still see it. To drop elements without
+    /// `T: Clone`, use [`truncate`](Self::truncate).
     pub fn pop(&mut self) -> Option<T>
     where
         T: Clone,
@@ -266,18 +284,28 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         self.len -= 1;
         let (page, slot) = Self::split(self.len);
         let ptr = self.pages[page].slots[slot];
-        // SAFETY: The slot was in bounds before the decrement; see get().
-        Some(unsafe { &*ptr }.clone())
+        Some(self.storage.try_take(ptr).unwrap_or_else(|| {
+            // SAFETY: The slot was in bounds before the decrement; see get().
+            unsafe { &*ptr }.clone()
+        }))
     }
 
     /// Shortens the vector, keeping the first `len` elements.
     ///
-    /// Copies nothing. Whole trailing pages are released when the root
-    /// table is not shared; if it is, they are released by the next write
-    /// that takes ownership of the root.
+    /// Copies nothing. Removed values are dropped right away if nothing
+    /// else references this vector's storage, and stay in the shared arena
+    /// otherwise. Whole trailing pages are released when the root table is
+    /// not shared; if it is, they are released by the next write that
+    /// takes ownership of the root.
     pub fn truncate(&mut self, len: usize) {
         if len < self.len {
+            let old_len = self.len;
             self.len = len;
+            let pages = &self.pages;
+            self.storage.release((len..old_len).map(|index| {
+                let (page, slot) = Self::split(index);
+                pages[page].slots[slot]
+            }));
         }
         if let Some(pages) = Arc::get_mut(&mut self.pages) {
             let needed = self.len.div_ceil(PAGE_SIZE);
@@ -375,6 +403,35 @@ impl<T: Clone, const N: usize> PagedVec<T, N> {
         let ptrs = fresh.storage.alloc_extend(self.iter().cloned());
         fresh.extend_ptrs(ptrs);
         fresh
+    }
+
+    /// Rebuilds this vector's storage (and pages) to hold just its live
+    /// elements if the storage currently keeps more than `max_allocations`
+    /// values alive. Moves the elements when nothing else references the
+    /// storage and clones them otherwise. See
+    /// [`CowVec::compact`](crate::CowVec::compact).
+    pub fn compact(&mut self, max_allocations: usize) {
+        if self.storage.allocated() <= max_allocations {
+            return;
+        }
+        let values = match Arc::get_mut(&mut self.pages) {
+            Some(_) => {
+                let pages = &self.pages;
+                let ptrs: Vec<*const T> = (0..self.len)
+                    .map(|index| {
+                        let (page, slot) = Self::split(index);
+                        pages[page].slots[slot]
+                    })
+                    .collect();
+                self.storage.take_all(&ptrs)
+            }
+            None => None,
+        };
+        let values = values.unwrap_or_else(|| self.iter().cloned().collect());
+        let mut fresh = Self::new();
+        let ptrs = fresh.storage.alloc_vec(values);
+        fresh.extend_ptrs(ptrs);
+        *self = fresh;
     }
 }
 

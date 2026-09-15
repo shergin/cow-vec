@@ -7,15 +7,21 @@ use crate::storage::Storage;
 
 /// A vector-like container optimized for efficient cloning.
 ///
-/// `CowVec` stores values in append-only bump arenas shared between clones
-/// (kept alive via `Arc`). Each instance maintains a vector of pointers to
-/// those values; cloning shares both the storage and the pointer vector, so
+/// `CowVec` stores values in bump arenas shared between clones (kept alive
+/// via `Arc`). Each instance maintains a vector of pointers to those
+/// values; cloning shares both the storage and the pointer vector, so
 /// `clone()` is O(1).
 ///
 /// # Copy-on-Write Semantics
 /// The `set` method implements copy-on-write: it allocates a new value in
 /// this instance's storage and updates only this instance's pointer. Other
 /// clones continue to see the original value.
+///
+/// Values never move while a clone may still see them. Once nothing else
+/// references the storage, though, the vector owns its values outright:
+/// `pop` and `remove` move them out instead of cloning, `set` and
+/// `truncate` drop replaced values on the spot, and `make_mut` hands out
+/// the slot itself.
 ///
 /// # Thread Safety
 /// `CowVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation
@@ -95,8 +101,11 @@ impl<T> CowVec<T> {
     /// shared with other clones.
     ///
     /// This typically returns `true` after any clone operation. It is
-    /// conservative: storage that retains frozen ancestor arenas reports
-    /// `true` even if every other owner has already been dropped.
+    /// conservative between mutations: storage inherited from a lineage
+    /// whose other owners have all dropped is reclaimed by the next
+    /// mutation, and reports `true` until then. After
+    /// [`append`](Self::append) of a related vector it stays `true` until
+    /// the vector is compacted.
     pub fn is_storage_shared(&self) -> bool {
         self.storage.is_shared()
     }
@@ -106,6 +115,7 @@ impl<T> CowVec<T> {
     /// `pop`, and so on).
     ///
     /// Useful for deciding when to reclaim memory with
+    /// [`compact`](Self::compact) or
     /// [`clone_compacted`](Self::clone_compacted). After
     /// [`append`](Self::append) this is an upper bound, since the two
     /// vectors may have kept overlapping history alive.
@@ -184,25 +194,23 @@ impl<T> CowVec<T> {
 
     /// Removes the last element and returns it, or `None` if empty.
     ///
-    /// The returned value is cloned out of the shared arena, where the
-    /// original stays allocated (other clones may still reference it).
-    /// To drop elements without `T: Clone`, use [`truncate`](Self::truncate).
+    /// The value is moved out when nothing else references this vector's
+    /// storage. Otherwise it is cloned, and the original stays allocated
+    /// for the clones that may still see it. To drop elements without
+    /// `T: Clone`, use [`truncate`](Self::truncate).
     pub fn pop(&mut self) -> Option<T>
     where
         T: Clone,
     {
-        self.items_mut().pop().map(|ptr| {
-            // SAFETY: Same as get() - pointer is valid for arena's lifetime
-            unsafe { &*ptr }.clone()
-        })
+        let ptr = self.items_mut().pop()?;
+        Some(self.take_or_clone(ptr))
     }
 
     /// Removes and returns the element at the given index.
     ///
-    /// All elements after the index are shifted left.
-    ///
-    /// The returned value is cloned out of the shared arena, where the
-    /// original stays allocated (other clones may still reference it).
+    /// All elements after the index are shifted left. The value is moved
+    /// out when nothing else references this vector's storage and cloned
+    /// otherwise, as with [`pop`](Self::pop).
     ///
     /// # Panics
     /// Panics if `index >= len()`.
@@ -211,8 +219,20 @@ impl<T> CowVec<T> {
         T: Clone,
     {
         let ptr = self.items_mut().remove(index);
-        // SAFETY: Same as get() - pointer is valid for arena's lifetime
-        unsafe { &*ptr }.clone()
+        self.take_or_clone(ptr)
+    }
+
+    /// Moves the value at `ptr` out of storage if nothing else can reach
+    /// it, and clones it otherwise. `ptr` must already be gone from the
+    /// pointer table.
+    fn take_or_clone(&mut self, ptr: *const T) -> T
+    where
+        T: Clone,
+    {
+        self.storage.try_take(ptr).unwrap_or_else(|| {
+            // SAFETY: Pointer is valid for the arena's lifetime (see get()).
+            unsafe { &*ptr }.clone()
+        })
     }
 
     /// Swaps two elements in the vector.
@@ -300,14 +320,23 @@ impl<T> CowVec<T> {
     /// Removes consecutive elements for which `same_bucket` returns `true`,
     /// keeping the first of each run.
     ///
-    /// Note: Removed values remain in the shared arena.
+    /// Removed values are dropped right away if nothing else references
+    /// this vector's storage, and stay in the shared arena otherwise.
     pub fn dedup_by<F>(&mut self, mut same_bucket: F)
     where
         F: FnMut(&T, &T) -> bool,
     {
+        let owned = self.storage.owns_active();
+        let mut removed = Vec::new();
         // SAFETY: Pointers are valid for the arena's lifetime (see get()).
-        self.items_mut()
-            .dedup_by(|a, b| same_bucket(unsafe { &**a }, unsafe { &**b }));
+        self.items_mut().dedup_by(|a, b| {
+            let same = same_bucket(unsafe { &**a }, unsafe { &**b });
+            if same && owned {
+                removed.push(*a);
+            }
+            same
+        });
+        self.storage.release(removed);
     }
 
     /// Removes consecutive equal elements. See [`dedup_by`](Self::dedup_by).
@@ -343,13 +372,14 @@ impl<T> CowVec<T> {
     /// effect. When the pointer table is shared with clones, only the kept
     /// prefix is copied, not the whole table.
     ///
-    /// Note: Removed values remain in the shared arena.
+    /// Removed values are dropped right away if nothing else references
+    /// this vector's storage, and stay in the shared arena otherwise.
     pub fn truncate(&mut self, len: usize) {
         if len >= self.items.len() {
             return;
         }
         match Arc::get_mut(&mut self.items) {
-            Some(items) => items.truncate(len),
+            Some(items) => self.storage.release(items.drain(len..)),
             None => self.items = Arc::new(self.items[..len].to_vec()),
         }
     }
@@ -357,12 +387,11 @@ impl<T> CowVec<T> {
     /// Clears the vector, removing all elements.
     ///
     /// Copies nothing, even when the pointer table is shared with clones.
-    ///
-    /// Note: Values remain in the shared arena but are no longer
-    /// accessible through this `CowVec` instance.
+    /// Values are dropped right away if nothing else references this
+    /// vector's storage, and stay in the shared arena otherwise.
     pub fn clear(&mut self) {
         match Arc::get_mut(&mut self.items) {
-            Some(items) => items.clear(),
+            Some(items) => self.storage.release(items.drain(..)),
             None => self.items = Arc::new(Vec::new()),
         }
     }
@@ -389,9 +418,9 @@ impl<T> CowVec<T> {
     ///
     /// Removes all elements for which the predicate returns `false`. When
     /// the pointer table is shared with clones, only the kept pointers are
-    /// copied.
-    ///
-    /// Note: Removed values remain in the shared arena.
+    /// copied. Removed values are dropped right away if nothing else
+    /// references this vector's storage, and stay in the shared arena
+    /// otherwise.
     ///
     /// # Example
     /// ```
@@ -405,9 +434,20 @@ impl<T> CowVec<T> {
     where
         F: FnMut(&T) -> bool,
     {
+        let owned = self.storage.owns_active();
         // SAFETY (both arms): pointers are valid for the arena's lifetime.
         match Arc::get_mut(&mut self.items) {
-            Some(items) => items.retain(|ptr| f(unsafe { &**ptr })),
+            Some(items) => {
+                let mut removed = Vec::new();
+                items.retain(|ptr| {
+                    let keep = f(unsafe { &**ptr });
+                    if !keep && owned {
+                        removed.push(*ptr);
+                    }
+                    keep
+                });
+                self.storage.release(removed);
+            }
             None => {
                 let kept: Vec<*const T> = self
                     .items
@@ -472,7 +512,9 @@ impl<T> CowVec<T> {
 
     /// Removes the specified range and replaces it with elements from the iterator.
     ///
-    /// Returns the removed elements, cloned out of the shared arena.
+    /// Returns the removed elements, moved out if nothing else references
+    /// this vector's storage and cloned otherwise, as with
+    /// [`pop`](Self::pop).
     ///
     /// # Panics
     /// Panics if the range is out of bounds.
@@ -506,13 +548,11 @@ impl<T> CowVec<T> {
         // Allocate new elements in one batch.
         let new_ptrs = self.storage.alloc_extend(replace_with);
 
-        // Splice the pointer vector and clone out the removed values
-        self.items_mut()
-            .splice(start..end, new_ptrs)
-            .map(|ptr| {
-                // SAFETY: Pointer is valid for arena's lifetime
-                unsafe { &*ptr }.clone()
-            })
+        // Splice the pointer vector, then take the removed values out.
+        let removed: Vec<*const T> = self.items_mut().splice(start..end, new_ptrs).collect();
+        removed
+            .into_iter()
+            .map(|ptr| self.take_or_clone(ptr))
             .collect()
     }
 }
@@ -537,9 +577,9 @@ impl<T: Clone> CowVec<T> {
     /// clone gets a new arena containing only the currently visible elements.
     /// Otherwise this behaves exactly like `clone()`.
     ///
-    /// This is the way to reclaim memory from garbage accumulated by `set`,
-    /// `pop`, `remove`, and similar operations, whose old values stay in the
-    /// shared arena.
+    /// This always clones the live elements, since `self` keeps its own
+    /// copy. To rebuild a vector in place, moving the elements when
+    /// nothing else references its storage, use [`compact`](Self::compact).
     pub fn clone_compacted(&self, max_allocations: usize) -> Self {
         if self.storage.allocated() <= max_allocations {
             return self.clone();
@@ -555,6 +595,43 @@ impl<T: Clone> CowVec<T> {
             items: Arc::new(new_items),
         }
     }
+
+    /// Rebuilds this vector's storage to hold just its live elements,
+    /// contiguously, if the storage currently keeps more than
+    /// `max_allocations` values alive. Otherwise this does nothing.
+    ///
+    /// When nothing else references the storage, the elements are moved
+    /// into the fresh storage and every value left behind by `set`, `pop`,
+    /// and similar operations is dropped. Otherwise the elements are cloned
+    /// and the old storage lives on for the clones that share it.
+    ///
+    /// # Example
+    /// ```
+    /// use cow_vec::CowVec;
+    ///
+    /// let mut vec = CowVec::from(vec![1, 2, 3]);
+    /// for i in 0..100 {
+    ///     vec.set(0, i);
+    /// }
+    /// assert_eq!(vec.storage_allocations(), 103);
+    /// vec.compact(50);
+    /// assert_eq!(vec.storage_allocations(), 3);
+    /// assert_eq!(vec, vec![99, 2, 3]);
+    /// ```
+    pub fn compact(&mut self, max_allocations: usize) {
+        if self.storage.allocated() <= max_allocations {
+            return;
+        }
+        let values = match Arc::get_mut(&mut self.items) {
+            Some(items) => self.storage.take_all(items),
+            None => None,
+        };
+        let values = values.unwrap_or_else(|| self.iter().cloned().collect());
+        let mut storage = Storage::new();
+        let items = storage.alloc_vec(values);
+        self.storage = storage;
+        self.items = Arc::new(items);
+    }
 }
 
 impl<T> CowVec<T> {
@@ -563,6 +640,9 @@ impl<T> CowVec<T> {
     /// This implements copy-on-write semantics: a new entry is allocated in the
     /// arena with the given value, and only this instance's pointer is updated.
     /// Other clones of this `CowVec` continue to see the original value.
+    ///
+    /// The replaced value is dropped right away if nothing else references
+    /// this vector's storage, and stays in the shared arena otherwise.
     ///
     /// # Panics
     /// Panics if `index >= len()`.
@@ -574,17 +654,21 @@ impl<T> CowVec<T> {
                 index
             );
         }
+        let old = self.items[index];
         let ptr = self.storage.alloc(value);
         self.items_mut()[index] = ptr;
+        self.storage.release([old]);
     }
 
-    /// Returns a mutable reference to the element at `index`, first copying
-    /// its value to a fresh arena slot (copy-on-write).
+    /// Returns a mutable reference to the element at `index`
+    /// (copy-on-write).
     ///
-    /// Like [`Arc::make_mut`], the name makes the cost explicit: every call
-    /// clones the current value into a new arena allocation, even if nothing
-    /// is written through the returned reference. Other clones of this
-    /// `CowVec` keep seeing the original value.
+    /// Like [`Arc::make_mut`], this is free when the vector owns its value
+    /// outright and pays for a copy otherwise. If nothing else references
+    /// this vector's storage, the slot itself is handed out. If clones may
+    /// still see the value, it is first cloned into a fresh arena slot,
+    /// even if nothing is written through the returned reference. Other
+    /// clones of this `CowVec` keep seeing the original value either way.
     ///
     /// For replacing a value wholesale, prefer [`set`](Self::set), which
     /// moves the new value in without cloning the old one.
@@ -613,9 +697,18 @@ impl<T> CowVec<T> {
                 index
             );
         }
+        let ptr = self.items[index];
+        // Fast path: the table and the value are ours alone. (Checked
+        // separately from the use below to satisfy the borrow checker.)
+        let owned = Arc::get_mut(&mut self.items).is_some() && self.storage.get_mut(ptr).is_some();
+        if owned {
+            return self.storage.get_mut(ptr).expect("checked above");
+        }
         // Clone the current value to a new arena location (copy-on-write).
+        // The old value is not released: it is reachable from a clone, or
+        // the fast path would have taken it.
         // SAFETY: Same as get() - pointer is valid for arena's lifetime
-        let current = unsafe { &*self.items[index] }.clone();
+        let current = unsafe { &*ptr }.clone();
         let ptr = self.storage.alloc(current);
         self.items_mut()[index] = ptr;
         // SAFETY: The pointer was just allocated with write provenance and no

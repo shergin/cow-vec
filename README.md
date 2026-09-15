@@ -200,40 +200,55 @@ are the point.
 
 ## Memory model and compaction
 
-Storage is append-only. `set`, `pop`, `remove`, and `clear` leave the old
-values sitting there, because some other clone might still be pointing at
-them, and the arenas hand out pointers that cannot move. A long-lived
-vector you keep mutating therefore collects garbage. Two tools for that:
+Storage is append-only while anything else can see it. `set`, `pop`,
+`remove`, and `clear` on a vector with live clones leave the old values
+in place, because a clone might still be pointing at them, and the arenas
+hand out pointers that cannot move.
+
+Once a vector is the sole owner of its storage (never cloned, or every
+clone and ancestor is gone) it behaves like `Vec` again: `pop` and
+`remove` move values out, `set` and `truncate` drop the replaced values on
+the spot, and `make_mut` hands out the slot itself. Slots are still not
+reused, so a long-lived vector you keep mutating collects empty slots.
+Two tools for that:
 
 ```rust
 use cow_vec::CowVec;
 
 let mut vec = CowVec::from(vec![1, 2, 3]);
 for i in 0..100 {
-    vec.set(0, i); // each set allocates; old values stay behind
+    vec.set(0, i); // each set takes a fresh slot; the old value is dropped
 }
-assert_eq!(vec.storage_allocations(), 103); // 3 live + 100 garbage
+assert_eq!(vec.storage_allocations(), 103); // 3 live + 100 empty slots
 
-// Rebuild into fresh, contiguous storage once you are past a threshold:
-let compacted = vec.clone_compacted(50);
-assert_eq!(compacted.storage_allocations(), 3);
-assert_eq!(compacted, vec);
+// Rebuild in place once you are past a threshold. Nothing else shares
+// the storage here, so the elements are moved, not cloned:
+vec.compact(50);
+assert_eq!(vec.storage_allocations(), 3);
+
+// Or build a compacted copy and keep the original as it is:
+let copy = vec.clone_compacted(0);
+assert_eq!(copy, vec);
 ```
 
-Drop every clone of a lineage and all of its arenas go with it. Keep-alive
-chains drop iteratively, so a version chain hundreds of thousands of
-generations deep unwinds without blowing the stack.
+Drop every clone of a lineage and all of its arenas go with it. A vector
+that outlives its clones takes their arenas back on its next mutation.
+Keep-alive chains drop iteratively, so a version chain hundreds of
+thousands of generations deep unwinds without blowing the stack.
 
 ## Limitations
 
-- **No free `&mut T`.** `make_mut` clones the value into a fresh slot
-  every time. There is no in-place mutation that other clones could see —
-  that is the point.
-- **`pop`/`remove`/`splice` need `T: Clone`** so they can hand you an
-  owned value (the original has to stay in storage for everyone else).
-  `truncate` works for any `T`.
-- **Garbage until you compact**, as above. A poor fit for a long-lived
-  collection that mutates forever and never gets a compaction point.
+- **`&mut T` costs a clone while the storage is shared.** `make_mut`
+  hands out the slot directly only when nothing else references the
+  storage; otherwise it clones into a fresh slot first. There is no
+  in-place mutation that other clones could see — that is the point.
+- **`pop`/`remove`/`splice` need `T: Clone`** because, while the storage
+  is shared, the original has to stay put for everyone else. They move
+  the value out when it is not. `truncate` works for any `T`.
+- **Empty slots until you compact**, as above. Replaced values are
+  dropped promptly once the storage is owned, but their slots are not
+  reused. A poor fit for a long-lived collection that mutates forever and
+  never gets a compaction point.
 - **Small cheap elements** do not belong here. The pointer hop and
   per-element allocation are pure overhead — use `Vec` or `Arc<Vec<T>>`.
 - `PagedVec` currently has the core API only (no `insert`/`remove`/
