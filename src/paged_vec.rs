@@ -103,6 +103,21 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         (index / PAGE_SIZE, index % PAGE_SIZE)
     }
 
+    /// Copy-on-write access to the root table.
+    ///
+    /// A shared root is copied only up to the last page `len` reaches. Any
+    /// trailing pages a shared `truncate` could not release go with it,
+    /// whether the root was shared or has since become private.
+    fn pages_mut(&mut self) -> &mut Vec<Arc<Page<T, PAGE_SIZE>>> {
+        let needed = self.len.div_ceil(PAGE_SIZE);
+        if Arc::strong_count(&self.pages) > 1 {
+            self.pages = Arc::new(self.pages[..needed].to_vec());
+        }
+        let pages = Arc::make_mut(&mut self.pages);
+        pages.truncate(needed);
+        pages
+    }
+
     /// Creates a new empty `PagedVec`.
     pub fn new() -> Self {
         #[allow(clippy::let_unit_value)]
@@ -179,7 +194,7 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
     pub fn push(&mut self, value: T) {
         let ptr = self.storage.alloc(value);
         let (page, slot) = Self::split(self.len);
-        let pages = Arc::make_mut(&mut self.pages);
+        let pages = self.pages_mut();
         if page == pages.len() {
             pages.push(Arc::new(Page::empty()));
         }
@@ -204,7 +219,7 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         }
         let ptr = self.storage.alloc(value);
         let (page, slot) = Self::split(index);
-        let pages = Arc::make_mut(&mut self.pages);
+        let pages = self.pages_mut();
         Arc::make_mut(&mut pages[page]).slots[slot] = ptr;
     }
 
@@ -228,7 +243,7 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
         // SAFETY: In-bounds slot; see get().
         let current = unsafe { &*self.pages[page].slots[slot] }.clone();
         let ptr = self.storage.alloc(current);
-        let pages = Arc::make_mut(&mut self.pages);
+        let pages = self.pages_mut();
         Arc::make_mut(&mut pages[page]).slots[slot] = ptr;
         // SAFETY: Freshly allocated with write provenance; no other vector
         // references it, and the returned borrow keeps &mut self alive.
@@ -257,8 +272,9 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
 
     /// Shortens the vector, keeping the first `len` elements.
     ///
-    /// Copies nothing. Whole trailing pages are released opportunistically
-    /// when the root table is not shared.
+    /// Copies nothing. Whole trailing pages are released when the root
+    /// table is not shared; if it is, they are released by the next write
+    /// that takes ownership of the root.
     pub fn truncate(&mut self, len: usize) {
         if len < self.len {
             self.len = len;
@@ -301,25 +317,33 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
 
     /// Bulk-appends pointers, filling pages chunk by chunk.
     fn extend_ptrs(&mut self, ptrs: Vec<*const T>) {
-        let pages = Arc::make_mut(&mut self.pages);
+        let mut len = self.len;
+        let pages = self.pages_mut();
         let mut i = 0;
         while i < ptrs.len() {
-            let (page, slot) = Self::split(self.len);
+            let (page, slot) = Self::split(len);
             if page == pages.len() {
                 pages.push(Arc::new(Page::empty()));
             }
             let target = Arc::make_mut(&mut pages[page]);
             let take = (PAGE_SIZE - slot).min(ptrs.len() - i);
             target.slots[slot..slot + take].copy_from_slice(&ptrs[i..i + take]);
-            self.len += take;
+            len += take;
             i += take;
         }
+        self.len = len;
     }
 
     /// Test hook: address of a page's allocation, for asserting sharing.
     #[cfg(test)]
     pub(crate) fn page_addr(&self, page: usize) -> usize {
         Arc::as_ptr(&self.pages[page]) as usize
+    }
+
+    /// Test hook: number of pages the root table currently holds.
+    #[cfg(test)]
+    pub(crate) fn page_count(&self) -> usize {
+        self.pages.len()
     }
 }
 

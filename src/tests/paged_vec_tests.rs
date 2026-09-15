@@ -102,6 +102,29 @@ fn truncate_releases_trailing_pages_when_unshared() {
 }
 
 #[test]
+fn stale_pages_after_shared_truncate_are_released_on_write() {
+    let v1: SmallPaged<i32> = (0..64).collect(); // 8 pages
+    let mut v2 = v1.clone();
+    v2.truncate(9); // root shared: pages cannot be released yet
+    assert_eq!(v2.page_count(), 8);
+
+    // Writing while still shared copies only the two live pages.
+    v2.push(9);
+    assert_eq!(v2.page_count(), 2);
+    assert_eq!(v2.to_vec(), (0..10).collect::<Vec<_>>());
+    assert_eq!(v1.page_count(), 8);
+
+    // Same story once the sibling is gone before the write.
+    let mut v3 = v1.clone();
+    v3.truncate(9);
+    drop(v1);
+    assert_eq!(v3.page_count(), 8);
+    v3.push(9);
+    assert_eq!(v3.page_count(), 2);
+    assert_eq!(v3.to_vec(), (0..10).collect::<Vec<_>>());
+}
+
+#[test]
 fn make_mut_diverges_one_page() {
     let v1: SmallPaged<String> = (0..16).map(|i| i.to_string()).collect();
     let mut v2 = v1.clone();
