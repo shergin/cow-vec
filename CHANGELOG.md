@@ -28,6 +28,11 @@
   takes their arenas back on its next mutation, so `is_storage_shared`
   turns `false` again instead of staying `true` forever, and values from
   those arenas can be moved like any other.
+- **A sole owner reuses freed slots.** Slots vacated by a move-out or an
+  in-place drop are handed to later allocations, so mutating a vector
+  nothing else shares no longer grows its storage. `storage_allocations`
+  counts slots, reused ones once; garbage now only accumulates for values
+  a clone could still see.
 - **Storage no longer depends on `typed-arena`.** Values live in a
   private chunk list that is only ever mutated through `Arc::get_mut`,
   so the hand-written `Sync` impl on the arena is gone; the remaining

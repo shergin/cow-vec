@@ -15,7 +15,9 @@
 //!
 //! Values never move once allocated, but a storage that nothing else can
 //! reach may move a value *out* (`try_take`) or drop it in place
-//! (`release`). Each chunk tracks which slots that has happened to.
+//! (`release`). Each chunk tracks which slots that has happened to, and the
+//! arena hands those slots out again to later allocations, so a sole owner
+//! that keeps mutating does not grow its storage.
 
 use std::collections::HashSet;
 use std::mem::{self, ManuallyDrop, MaybeUninit};
@@ -127,6 +129,19 @@ impl<T> Chunk<T> {
         dead[index / 64] |= 1 << (index % 64);
     }
 
+    /// Writes `value` into a dead slot, making it live again.
+    ///
+    /// # Safety
+    /// `index` must be a dead slot below `len`.
+    unsafe fn revive(&mut self, index: usize, value: T) -> *const T {
+        debug_assert!(index < self.len && self.is_dead(index));
+        let dead = self.dead.as_mut().expect("a dead slot exists");
+        dead[index / 64] &= !(1 << (index % 64));
+        let ptr = self.slot(index);
+        ptr::write(ptr, value);
+        ptr
+    }
+
     /// Writes `value` into the next free slot. The caller ensures there is
     /// room.
     #[inline]
@@ -207,6 +222,10 @@ struct Arena<T> {
     chunks: Vec<Chunk<T>>,
     /// Index of the chunk taking new values; `usize::MAX` before the first.
     current: usize,
+    /// Addresses of dead slots, reused by [`alloc`](Self::alloc) before it
+    /// touches fresh capacity. Only ever non-empty in an arena its owner
+    /// has moved values out of.
+    free: Vec<usize>,
 }
 
 impl<T> Arena<T> {
@@ -214,6 +233,7 @@ impl<T> Arena<T> {
         Self {
             chunks: Vec::new(),
             current: usize::MAX,
+            free: Vec::new(),
         }
     }
 
@@ -246,8 +266,37 @@ impl<T> Arena<T> {
         self.insert(Chunk::with_capacity(capacity))
     }
 
-    fn alloc(&mut self, value: T) -> *const T {
-        self.chunk_with_room(1).push(value)
+    /// Stores `value`, reusing a dead slot when one is available. Returns
+    /// the pointer and whether a fresh slot was taken.
+    fn alloc(&mut self, value: T) -> (*const T, bool) {
+        if let Some(addr) = self.free.pop() {
+            let (chunk, slot) = self
+                .locate(addr as *const T)
+                .expect("free list entries are slots of this arena");
+            // SAFETY: Every free-list entry is a dead slot below `len`.
+            return (unsafe { self.chunks[chunk].revive(slot, value) }, false);
+        }
+        (self.chunk_with_room(1).push(value), true)
+    }
+
+    /// Moves the value out of the slot at `ptr` and queues the slot for
+    /// reuse.
+    ///
+    /// # Safety
+    /// `ptr` must be a live slot of this arena that nothing else references.
+    unsafe fn take(&mut self, chunk: usize, slot: usize) -> T {
+        let value = self.chunks[chunk].take(slot);
+        self.free.push(self.chunks[chunk].slot(slot) as usize);
+        value
+    }
+
+    /// Drops the value in the slot in place and queues the slot for reuse.
+    ///
+    /// # Safety
+    /// As for [`take`](Self::take).
+    unsafe fn drop_slot(&mut self, chunk: usize, slot: usize) {
+        self.chunks[chunk].drop_slot(slot);
+        self.free.push(self.chunks[chunk].slot(slot) as usize);
     }
 
     /// Stores every element of `values` contiguously.
@@ -283,11 +332,12 @@ impl<T> Arena<T> {
         self.chunks[i].slot_of(ptr).map(|slot| (i, slot))
     }
 
-    /// Adds every chunk of `other`, keeping address order and the current
-    /// chunk.
+    /// Adds every chunk (and free slot) of `other`, keeping address order
+    /// and the current chunk.
     fn merge(&mut self, other: Arena<T>) {
         let current_base = self.chunks.get(self.current).map(Chunk::base);
         self.chunks.extend(other.chunks);
+        self.free.extend(other.free);
         self.chunks.sort_unstable_by_key(Chunk::base);
         self.current = current_base.map_or(usize::MAX, |base| {
             self.chunks.partition_point(|c| c.base() < base)
@@ -338,9 +388,10 @@ impl<T> Drop for ChainNode<T> {
 pub(crate) struct Storage<T> {
     active: Arc<Arena<T>>,
     frozen: Option<Arc<ChainNode<T>>>,
-    /// Number of values this storage keeps alive. Exact for a single
-    /// lineage; an upper bound after [`absorb`](Self::absorb), which may
-    /// double-count shared ancestry.
+    /// Number of value slots this storage holds, live or not. A slot
+    /// reused after a move-out or in-place drop is not counted again.
+    /// Exact for a single lineage; an upper bound after
+    /// [`absorb`](Self::absorb), which may double-count shared ancestry.
     allocated: usize,
     /// Set by [`absorb`](Self::absorb) when the other storage shared an
     /// arena with this one: a single pointer table may then hold the same
@@ -376,8 +427,8 @@ impl<T> Storage<T> {
         self.aliased || Arc::strong_count(&self.active) > 1 || self.frozen.is_some()
     }
 
-    /// Number of values this storage keeps alive, including ones no longer
-    /// reachable through any vector. Upper bound after `absorb`.
+    /// Number of value slots this storage holds, including ones whose value
+    /// is unreachable or already gone. Upper bound after `absorb`.
     pub(crate) fn allocated(&self) -> usize {
         self.allocated
     }
@@ -489,9 +540,15 @@ impl<T> Storage<T> {
 
     /// Allocates a value and returns a pointer valid for this storage's
     /// lifetime (and the lifetime of every storage that later absorbs it).
+    ///
+    /// A slot freed earlier by [`try_take`](Self::try_take) or
+    /// [`release`](Self::release) is reused before fresh capacity is.
     pub(crate) fn alloc(&mut self, value: T) -> *const T {
-        self.allocated += 1;
-        self.active_mut().alloc(value)
+        let (ptr, fresh) = self.active_mut().alloc(value);
+        if fresh {
+            self.allocated += 1;
+        }
+        ptr
     }
 
     /// Allocates every value from the iterator, contiguously, and returns
@@ -519,7 +576,7 @@ impl<T> Storage<T> {
         // SAFETY: The arena is ours alone and nothing else holds a pointer
         // into it (see owns_active), and the caller has removed `ptr` from
         // its own table.
-        Some(unsafe { active.chunks[chunk].take(slot) })
+        Some(unsafe { active.take(chunk, slot) })
     }
 
     /// Returns the value at `ptr` mutably if this storage exclusively owns
@@ -550,7 +607,7 @@ impl<T> Storage<T> {
         for ptr in ptrs {
             if let Some((chunk, slot)) = active.locate(ptr) {
                 // SAFETY: As in try_take.
-                unsafe { active.chunks[chunk].drop_slot(slot) };
+                unsafe { active.drop_slot(chunk, slot) };
             }
         }
     }

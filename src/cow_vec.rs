@@ -110,9 +110,10 @@ impl<T> CowVec<T> {
         self.storage.is_shared()
     }
 
-    /// Returns the number of values this vector's storage keeps alive,
-    /// including values no longer reachable (replaced by `set`, dropped by
-    /// `pop`, and so on).
+    /// Returns the number of value slots this vector's storage holds,
+    /// including slots whose value is unreachable (replaced by `set` while
+    /// a clone could still see it) or already gone (freed by a sole owner
+    /// and waiting to be reused).
     ///
     /// Useful for deciding when to reclaim memory with
     /// [`compact`](Self::compact) or
@@ -611,10 +612,17 @@ impl<T: Clone> CowVec<T> {
     /// use cow_vec::CowVec;
     ///
     /// let mut vec = CowVec::from(vec![1, 2, 3]);
-    /// for i in 0..100 {
-    ///     vec.set(0, i);
-    /// }
+    /// // Each version keeps the value it replaced alive for the snapshot
+    /// // taken just before.
+    /// let history: Vec<CowVec<i32>> = (0..100)
+    ///     .map(|i| {
+    ///         let snapshot = vec.clone();
+    ///         vec.set(0, i);
+    ///         snapshot
+    ///     })
+    ///     .collect();
     /// assert_eq!(vec.storage_allocations(), 103);
+    /// drop(history);
     /// vec.compact(50);
     /// assert_eq!(vec.storage_allocations(), 3);
     /// assert_eq!(vec, vec![99, 2, 3]);

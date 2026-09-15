@@ -251,9 +251,15 @@ macro_rules! shared_vec_tests {
             #[test]
             fn clone_compacted_reclaims_garbage() {
                 let mut v = $V::from(vec![1, 2, 3]);
-                for i in 0..20 {
-                    v.set(0, i);
-                }
+                // Every write happens while a snapshot can still see the
+                // old value, so each one takes a fresh slot.
+                let history: Vec<_> = (0..20)
+                    .map(|i| {
+                        let snapshot = v.clone();
+                        v.set(0, i);
+                        snapshot
+                    })
+                    .collect();
                 assert_eq!(v.storage_allocations(), 23);
                 let compacted = v.clone_compacted(10);
                 assert_eq!(compacted.storage_allocations(), 3);
@@ -261,6 +267,38 @@ macro_rules! shared_vec_tests {
                 // Under the limit, it behaves like clone().
                 let cheap = compacted.clone_compacted(10);
                 assert_eq!(cheap.storage_allocations(), 3);
+                drop(history);
+            }
+
+            #[test]
+            fn sole_owner_reuses_freed_slots() {
+                let mut v = $V::from(vec![1, 2, 3]);
+                for i in 0..100 {
+                    v.set(0, i);
+                }
+                // set allocates the new value before it frees the old one,
+                // so one spare slot stays in rotation.
+                assert_eq!(v.storage_allocations(), 4);
+                for i in 0..100 {
+                    v.pop();
+                    v.push(i);
+                    *v.make_mut(2) += 1;
+                }
+                assert_eq!(v.storage_allocations(), 4);
+                assert_eq!(v.to_vec(), vec![99, 2, 100]);
+
+                // Values a snapshot can still see are never reused...
+                let snapshot = v.clone();
+                v.set(0, -1);
+                assert_eq!(v.storage_allocations(), 5);
+                assert_eq!(snapshot[0], 99);
+                // ...until the snapshot is gone and the next write
+                // reclaims its arena.
+                drop(snapshot);
+                v.set(0, -2);
+                v.set(0, -3);
+                assert_eq!(v.storage_allocations(), 5);
+                assert_eq!(v[0], -3);
             }
 
             #[test]
@@ -335,10 +373,12 @@ macro_rules! shared_vec_tests {
                 for i in 0..10 {
                     v.set(0, counters.tracked(i));
                 }
-                assert_eq!(v.storage_allocations(), 12);
+                // A sole owner reuses the slot it just freed, so only one
+                // spare slot accumulates.
+                assert_eq!(v.storage_allocations(), 3);
                 assert_eq!(counters.drops(), 10, "replaced values dropped as they went");
 
-                v.compact(5);
+                v.compact(2);
                 assert_eq!(v.storage_allocations(), 2);
                 assert_eq!(counters.clones(), 0, "sole owner moves into fresh storage");
                 assert_eq!(counters.drops(), 10, "nothing live was dropped");
