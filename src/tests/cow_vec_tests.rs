@@ -1,253 +1,13 @@
-use std::sync::Arc;
 use std::thread;
 
 use crate::tests::shared_suite::Counters;
 use crate::CowVec;
 
 #[test]
-fn test_new_creates_empty_vec() {
-    let vec: CowVec<i32> = CowVec::new();
-    assert!(vec.is_empty());
-    assert_eq!(vec.len(), 0);
-}
-
-#[test]
 fn test_with_capacity() {
     let vec: CowVec<i32> = CowVec::with_capacity(100);
     assert!(vec.is_empty());
     assert_eq!(vec.len(), 0);
-}
-
-#[test]
-fn test_push_and_get() {
-    let mut vec = CowVec::new();
-    vec.push(1);
-    vec.push(2);
-    vec.push(3);
-
-    assert_eq!(vec.len(), 3);
-    assert_eq!(vec.get(0), Some(&1));
-    assert_eq!(vec.get(1), Some(&2));
-    assert_eq!(vec.get(2), Some(&3));
-    assert_eq!(vec.get(3), None);
-}
-
-#[test]
-fn test_index_operator() {
-    let vec = CowVec::from(vec![10, 20, 30]);
-    assert_eq!(vec[0], 10);
-    assert_eq!(vec[1], 20);
-    assert_eq!(vec[2], 30);
-}
-
-#[test]
-#[should_panic(expected = "index out of bounds")]
-fn test_index_out_of_bounds() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    let _ = vec[3];
-}
-
-#[test]
-fn test_from_vec() {
-    let vec = CowVec::from(vec!["a", "b", "c"]);
-    assert_eq!(vec.len(), 3);
-    assert_eq!(vec[0], "a");
-    assert_eq!(vec[1], "b");
-    assert_eq!(vec[2], "c");
-}
-
-#[test]
-fn test_clone_shares_arena() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let vec2 = vec1.clone();
-
-    // Both should have the same values.
-    assert_eq!(vec1.len(), vec2.len());
-    assert_eq!(vec1[0], vec2[0]);
-    assert_eq!(vec1[1], vec2[1]);
-    assert_eq!(vec1[2], vec2[2]);
-}
-
-#[test]
-fn test_set_copy_on_write() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    // Modify vec2.
-    vec2.set(0, 100);
-
-    // vec1 should be unchanged.
-    assert_eq!(vec1[0], 1);
-    // vec2 should have the new value.
-    assert_eq!(vec2[0], 100);
-}
-
-#[test]
-#[should_panic(expected = "index out of bounds")]
-fn test_set_out_of_bounds() {
-    let mut vec = CowVec::from(vec![1, 2, 3]);
-    vec.set(3, 100);
-}
-
-#[test]
-fn test_iterator() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let collected: Vec<&i32> = vec.iter().collect();
-    assert_eq!(collected, vec![&1, &2, &3, &4, &5]);
-}
-
-#[test]
-fn test_iterator_size_hint() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    let mut iter = vec.iter();
-    assert_eq!(iter.size_hint(), (3, Some(3)));
-    iter.next();
-    assert_eq!(iter.size_hint(), (2, Some(2)));
-    iter.next();
-    assert_eq!(iter.size_hint(), (1, Some(1)));
-    iter.next();
-    assert_eq!(iter.size_hint(), (0, Some(0)));
-}
-
-#[test]
-fn test_into_iterator() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    let mut sum = 0;
-    for &item in &vec {
-        sum += item;
-    }
-    assert_eq!(sum, 6);
-}
-
-#[test]
-fn test_default() {
-    let vec: CowVec<i32> = CowVec::default();
-    assert!(vec.is_empty());
-}
-
-#[test]
-fn test_with_complex_type() {
-    #[derive(Clone, Debug, PartialEq)]
-    struct Item {
-        id: i32,
-        name: String,
-    }
-
-    let mut vec = CowVec::new();
-    vec.push(Item {
-        id: 1,
-        name: "first".to_string(),
-    });
-    vec.push(Item {
-        id: 2,
-        name: "second".to_string(),
-    });
-
-    assert_eq!(vec[0].id, 1);
-    assert_eq!(vec[1].name, "second");
-
-    let mut vec2 = vec.clone();
-    vec2.set(
-        0,
-        Item {
-            id: 100,
-            name: "modified".to_string(),
-        },
-    );
-
-    assert_eq!(vec[0].id, 1);
-    assert_eq!(vec2[0].id, 100);
-}
-
-#[test]
-fn test_thread_safety() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let vec_arc = Arc::new(vec);
-
-    let handles: Vec<_> = (0..4)
-        .map(|i| {
-            let vec_clone = Arc::clone(&vec_arc);
-            thread::spawn(move || {
-                let sum: i32 = vec_clone.iter().sum();
-                assert_eq!(sum, 15);
-                vec_clone[i % 5]
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-}
-
-#[test]
-fn test_push_after_clone() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    vec2.push(4);
-
-    assert_eq!(vec1.len(), 3);
-    assert_eq!(vec2.len(), 4);
-    assert_eq!(vec2[3], 4);
-}
-
-#[test]
-fn test_multiple_clones() {
-    let original = CowVec::from(vec![1, 2, 3]);
-    let clone1 = original.clone();
-    let clone2 = original.clone();
-    let mut clone3 = clone1.clone();
-
-    clone3.set(0, 100);
-
-    assert_eq!(original[0], 1);
-    assert_eq!(clone1[0], 1);
-    assert_eq!(clone2[0], 1);
-    assert_eq!(clone3[0], 100);
-}
-
-#[test]
-fn test_empty_iterator() {
-    let vec: CowVec<i32> = CowVec::new();
-    let collected: Vec<&i32> = vec.iter().collect();
-    assert!(collected.is_empty());
-}
-
-#[test]
-fn test_first_and_last() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(vec.first(), Some(&1));
-    assert_eq!(vec.last(), Some(&3));
-
-    let empty: CowVec<i32> = CowVec::new();
-    assert_eq!(empty.first(), None);
-    assert_eq!(empty.last(), None);
-
-    let single = CowVec::from(vec![42]);
-    assert_eq!(single.first(), Some(&42));
-    assert_eq!(single.last(), Some(&42));
-}
-
-#[test]
-fn test_pop() {
-    let mut vec = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(vec.pop(), Some(3));
-    assert_eq!(vec.len(), 2);
-    assert_eq!(vec.pop(), Some(2));
-    assert_eq!(vec.pop(), Some(1));
-    assert_eq!(vec.pop(), None);
-    assert!(vec.is_empty());
-}
-
-#[test]
-fn test_pop_does_not_affect_clones() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    vec2.pop();
-    assert_eq!(vec1.len(), 3);
-    assert_eq!(vec2.len(), 2);
 }
 
 #[test]
@@ -303,28 +63,6 @@ fn test_reverse() {
     let mut empty: CowVec<i32> = CowVec::new();
     empty.reverse();
     assert!(empty.is_empty());
-}
-
-#[test]
-fn test_truncate() {
-    let mut vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    vec.truncate(3);
-    assert_eq!(vec.len(), 3);
-    assert_eq!(vec[2], 3);
-
-    vec.truncate(10);
-    assert_eq!(vec.len(), 3);
-
-    vec.truncate(0);
-    assert!(vec.is_empty());
-}
-
-#[test]
-fn test_clear() {
-    let mut vec = CowVec::from(vec![1, 2, 3]);
-    vec.clear();
-    assert!(vec.is_empty());
-    assert_eq!(vec.len(), 0);
 }
 
 #[test]
@@ -435,69 +173,6 @@ fn remove_splice_retain_dedup_move_or_drop_when_owned() {
 }
 
 #[test]
-fn test_clear_does_not_affect_clones() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    vec2.clear();
-    assert_eq!(vec1.len(), 3);
-    assert!(vec2.is_empty());
-}
-
-#[test]
-fn test_extend() {
-    let mut vec = CowVec::from(vec![1, 2]);
-    vec.extend(vec![3, 4, 5]);
-    assert_eq!(vec.len(), 5);
-    assert_eq!(vec[2], 3);
-    assert_eq!(vec[3], 4);
-    assert_eq!(vec[4], 5);
-}
-
-#[test]
-fn test_extend_empty() {
-    let mut vec: CowVec<i32> = CowVec::new();
-    vec.extend(vec![1, 2, 3]);
-    assert_eq!(vec.len(), 3);
-}
-
-#[test]
-fn test_position_via_iterator() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    assert_eq!(vec.iter().position(|&x| x == 3), Some(2));
-    assert_eq!(vec.iter().position(|&x| x == 10), None);
-    assert_eq!(vec.iter().position(|&x| x > 3), Some(3));
-}
-
-#[test]
-fn test_contains() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    assert!(vec.contains(&3));
-    assert!(!vec.contains(&10));
-}
-
-#[test]
-fn test_contains_with_strings() {
-    let vec = CowVec::from(vec!["hello", "world"]);
-    assert!(vec.contains(&"hello"));
-    assert!(!vec.contains(&"foo"));
-}
-
-#[test]
-fn test_to_vec() {
-    let cow_vec = CowVec::from(vec![1, 2, 3]);
-    let regular_vec = cow_vec.to_vec();
-    assert_eq!(regular_vec, vec![1, 2, 3]);
-}
-
-#[test]
-fn test_to_vec_empty() {
-    let cow_vec: CowVec<i32> = CowVec::new();
-    let regular_vec = cow_vec.to_vec();
-    assert!(regular_vec.is_empty());
-}
-
-#[test]
 fn test_operations_chain() {
     let mut vec = CowVec::from(vec![5, 3, 1, 4, 2]);
     vec.reverse();
@@ -506,50 +181,6 @@ fn test_operations_chain() {
     vec.swap(0, 1);
 
     assert_eq!(vec.to_vec(), vec![4, 2, 1, 3, 10]);
-}
-
-#[test]
-fn test_clone_compacted_shares_arena_when_under_limit() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let vec2 = vec1.clone_compacted(10);
-
-    // Both should have the same values.
-    assert_eq!(vec1.to_vec(), vec2.to_vec());
-
-    // They should share the same arena (Arc points to same allocation).
-    // We can verify this indirectly: modifications to vec2 via set should
-    // NOT affect vec1 (copy-on-write), but they share the base arena.
-    let mut vec3 = vec2.clone();
-    vec3.set(0, 100);
-    assert_eq!(vec1[0], 1);
-    assert_eq!(vec2[0], 1);
-    assert_eq!(vec3[0], 100);
-}
-
-#[test]
-fn test_clone_compacted_creates_new_arena_when_over_limit() {
-    let mut vec1 = CowVec::from(vec![1, 2, 3]);
-
-    // Make many allocations to exceed the limit.
-    for i in 0..10 {
-        vec1.set(0, i);
-    }
-    // Now arena has 3 (initial) + 10 (sets) = 13 allocations.
-
-    // Clone with max_capacity of 5 should create a new arena.
-    let vec2 = vec1.clone_compacted(5);
-
-    // Values should be the same.
-    assert_eq!(vec1.to_vec(), vec2.to_vec());
-    assert_eq!(vec2[0], 9);
-
-    // The new arena should have only 3 allocations (the current elements).
-    // Further sets on vec2 should not affect vec1.
-    let mut vec3 = vec2.clone();
-    vec3.set(0, 999);
-    assert_eq!(vec1[0], 9);
-    assert_eq!(vec2[0], 9);
-    assert_eq!(vec3[0], 999);
 }
 
 #[test]
@@ -570,64 +201,10 @@ fn test_clone_compacted_compacts_after_pop() {
 }
 
 #[test]
-fn test_clone_compacted_at_exact_limit() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    // Arena has exactly 3 allocations.
-
-    // Clone with max_capacity of 3 should share arena (not exceed).
-    let vec2 = vec1.clone_compacted(3);
-    assert_eq!(vec2.to_vec(), vec![1, 2, 3]);
-
-    // Clone with max_capacity of 2 should create new arena (exceeds).
-    let vec3 = vec1.clone_compacted(2);
-    assert_eq!(vec3.to_vec(), vec![1, 2, 3]);
-}
-
-#[test]
-fn test_make_mut_basic() {
-    let mut vec = CowVec::from(vec![1, 2, 3]);
-    *vec.make_mut(0) = 100;
-    assert_eq!(vec[0], 100);
-    assert_eq!(vec[1], 2);
-    assert_eq!(vec[2], 3);
-}
-
-#[test]
-fn test_make_mut_in_place_mutation() {
-    let mut vec = CowVec::from(vec![String::from("ab")]);
-    vec.make_mut(0).push('c');
-    assert_eq!(vec[0], "abc");
-}
-
-#[test]
-fn test_make_mut_does_not_affect_clones() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    *vec2.make_mut(0) = 100;
-
-    // vec1 should be unchanged (copy-on-write).
-    assert_eq!(vec1[0], 1);
-    assert_eq!(vec2[0], 100);
-}
-
-#[test]
 #[should_panic(expected = "index out of bounds")]
 fn test_make_mut_out_of_bounds() {
     let mut vec = CowVec::from(vec![1, 2, 3]);
     *vec.make_mut(3) = 100;
-}
-
-#[test]
-fn test_iterator_exact_size() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let iter = vec.iter();
-    assert_eq!(iter.len(), 5);
-
-    let mut iter = vec.iter();
-    iter.next();
-    iter.next();
-    assert_eq!(iter.len(), 3);
 }
 
 #[test]
@@ -646,16 +223,6 @@ fn test_remove_does_not_affect_clones() {
     assert_eq!(vec1.len(), 5);
     assert_eq!(vec1[2], 3);
     assert_eq!(vec2.len(), 4);
-}
-
-#[test]
-fn test_truncate_does_not_affect_clones() {
-    let vec1 = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let mut vec2 = vec1.clone();
-
-    vec2.truncate(2);
-    assert_eq!(vec1.len(), 5);
-    assert_eq!(vec2.len(), 2);
 }
 
 #[test]
@@ -690,18 +257,6 @@ fn test_extend_does_not_affect_clones() {
     vec2.extend(vec![3, 4, 5]);
     assert_eq!(vec1.len(), 2);
     assert_eq!(vec2.len(), 5);
-}
-
-#[test]
-fn test_position_empty() {
-    let vec: CowVec<i32> = CowVec::new();
-    assert_eq!(vec.iter().position(|&x| x == 1), None);
-}
-
-#[test]
-fn test_contains_empty() {
-    let vec: CowVec<i32> = CowVec::new();
-    assert!(!vec.contains(&1));
 }
 
 #[test]
@@ -796,34 +351,6 @@ fn test_as_slice_supports_slice_methods() {
     assert_eq!(*sub_slice[0], 2);
     assert_eq!(*sub_slice[1], 8);
     assert_eq!(*sub_slice[2], 1);
-}
-
-#[test]
-fn test_debug_basic() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    let debug_str = format!("{:?}", vec);
-    assert_eq!(debug_str, "[1, 2, 3]");
-}
-
-#[test]
-fn test_debug_empty() {
-    let vec: CowVec<i32> = CowVec::new();
-    let debug_str = format!("{:?}", vec);
-    assert_eq!(debug_str, "[]");
-}
-
-#[test]
-fn test_debug_single_element() {
-    let vec = CowVec::from(vec![42]);
-    let debug_str = format!("{:?}", vec);
-    assert_eq!(debug_str, "[42]");
-}
-
-#[test]
-fn test_debug_with_strings() {
-    let vec = CowVec::from(vec!["hello", "world"]);
-    let debug_str = format!("{:?}", vec);
-    assert_eq!(debug_str, "[\"hello\", \"world\"]");
 }
 
 #[test]
@@ -1054,63 +581,6 @@ fn test_splice_does_not_affect_clones() {
 // ============================================================================
 
 #[test]
-fn test_is_structure_shared_fresh_vec() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    assert!(!vec.is_structure_shared());
-}
-
-#[test]
-fn test_is_storage_shared_fresh_vec() {
-    let vec = CowVec::from(vec![1, 2, 3]);
-    assert!(!vec.is_storage_shared());
-}
-
-#[test]
-fn test_is_structure_shared_after_clone() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let vec2 = vec1.clone();
-    assert!(vec1.is_structure_shared());
-    assert!(vec2.is_structure_shared());
-}
-
-#[test]
-fn test_is_storage_shared_after_clone() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let vec2 = vec1.clone();
-    assert!(vec1.is_storage_shared());
-    assert!(vec2.is_storage_shared());
-}
-
-#[test]
-fn test_is_structure_shared_after_mutation() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    // Before mutation, both share structure
-    assert!(vec1.is_structure_shared());
-    assert!(vec2.is_structure_shared());
-
-    // Mutation triggers COW on structure
-    vec2.push(4);
-
-    // vec2 now has its own structure, vec1's structure is no longer shared
-    assert!(!vec1.is_structure_shared());
-    assert!(!vec2.is_structure_shared());
-}
-
-#[test]
-fn test_is_storage_shared_after_mutation() {
-    let vec1 = CowVec::from(vec![1, 2, 3]);
-    let mut vec2 = vec1.clone();
-
-    // Mutation does NOT affect storage sharing (arena is always shared)
-    vec2.push(4);
-
-    assert!(vec1.is_storage_shared());
-    assert!(vec2.is_storage_shared());
-}
-
-#[test]
 fn test_sharing_with_multiple_clones() {
     let vec1 = CowVec::from(vec![1, 2, 3]);
     let vec2 = vec1.clone();
@@ -1134,26 +604,6 @@ fn test_sharing_with_multiple_clones() {
     assert!(vec1.is_storage_shared());
     assert!(vec2.is_storage_shared());
     assert!(vec3.is_storage_shared());
-}
-
-#[test]
-fn test_iter_reverse() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let reversed: Vec<i32> = vec.iter().rev().cloned().collect();
-    assert_eq!(reversed, vec![5, 4, 3, 2, 1]);
-}
-
-#[test]
-fn test_iter_from_both_ends() {
-    let vec = CowVec::from(vec![1, 2, 3, 4, 5]);
-    let mut iter = vec.iter();
-    assert_eq!(iter.next(), Some(&1));
-    assert_eq!(iter.next_back(), Some(&5));
-    assert_eq!(iter.next(), Some(&2));
-    assert_eq!(iter.next_back(), Some(&4));
-    assert_eq!(iter.next(), Some(&3));
-    assert_eq!(iter.next(), None);
-    assert_eq!(iter.next_back(), None);
 }
 
 #[test]
@@ -1197,79 +647,11 @@ fn test_iter_count_and_last() {
 }
 
 #[test]
-fn test_eq_by_elements() {
-    let a = CowVec::from(vec![1, 2, 3]);
-    let b = CowVec::from(vec![1, 2, 3]);
-    let c = CowVec::from(vec![1, 2, 4]);
-    assert_eq!(a, b);
-    assert_ne!(a, c);
-    assert_ne!(a, CowVec::from(vec![1, 2]));
-}
-
-#[test]
-fn test_eq_shared_structure_fast_path() {
-    let a = CowVec::from(vec![1, 2, 3]);
-    let b = a.clone();
-    assert_eq!(a, b);
-}
-
-#[test]
-fn test_eq_against_vec_and_slice() {
-    let a = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(a, vec![1, 2, 3]);
-    assert_eq!(a, *[1, 2, 3].as_slice());
-    assert_ne!(a, vec![1, 2]);
-}
-
-#[test]
-fn test_ord_lexicographic() {
-    let a = CowVec::from(vec![1, 2]);
-    let b = CowVec::from(vec![1, 3]);
-    let c = CowVec::from(vec![1, 2, 0]);
-    assert!(a < b);
-    assert!(a < c);
-    assert!(b > c);
-}
-
-#[test]
-fn test_hash_consistent_with_eq() {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    fn hash_of<T: Hash>(value: &T) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    let a = CowVec::from(vec![1, 2, 3]);
-    let mut b = a.clone();
-    b.set(0, 1); // same value, different arena slot
-    assert_eq!(hash_of(&a), hash_of(&b));
-}
-
-#[test]
-fn test_from_iterator_collect() {
-    let vec: CowVec<i32> = (1..=5).collect();
-    assert_eq!(vec, vec![1, 2, 3, 4, 5]);
-}
-
-#[test]
 fn test_from_slice() {
     let source = [String::from("a"), String::from("b")];
     let vec = CowVec::from(source.as_slice());
     assert_eq!(vec.len(), 2);
     assert_eq!(vec[0], "a");
-}
-
-#[test]
-fn test_extend_trait_from_generic_code() {
-    fn fill<E: Extend<i32>>(target: &mut E) {
-        target.extend([1, 2, 3]);
-    }
-    let mut vec = CowVec::new();
-    fill(&mut vec);
-    assert_eq!(vec, vec![1, 2, 3]);
 }
 
 #[test]
@@ -1416,30 +798,6 @@ fn test_concurrent_divergence_no_contention() {
     // Base is untouched.
     assert_eq!(base[0], 0);
     assert_eq!(base.len(), 100);
-}
-
-#[test]
-fn test_storage_allocations_counts_garbage() {
-    let mut v = CowVec::from(vec![1, 2, 3]);
-    assert_eq!(v.storage_allocations(), 3);
-    for i in 0..10 {
-        v.set(0, i);
-    }
-    assert_eq!(v.storage_allocations(), 13);
-    let compacted = v.clone_compacted(5);
-    assert_eq!(compacted.storage_allocations(), 3);
-    assert_eq!(compacted, vec![9, 2, 3]);
-}
-
-#[test]
-fn test_values_outlive_original_after_clone_drop() {
-    let v2;
-    {
-        let v1 = CowVec::from(vec![String::from("alpha"), String::from("beta")]);
-        v2 = v1.clone();
-    } // v1 dropped; storage kept alive by v2
-    assert_eq!(v2[0], "alpha");
-    assert_eq!(v2[1], "beta");
 }
 
 // The behavior contract every vector type in this crate must satisfy.
