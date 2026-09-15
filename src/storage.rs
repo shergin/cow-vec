@@ -6,59 +6,182 @@
 //!
 //! Allocation never takes a lock. The safety story is ownership-based: an
 //! instance allocates into its active arena only while it holds the sole
-//! `Arc` to it (checked via `Arc::strong_count` under `&mut self`). The
-//! moment an arena becomes shared - because the instance was cloned - the
-//! next allocation pushes it onto the frozen chain and starts a fresh arena.
-//! Frozen arenas are never allocated into again; they are held purely to
-//! keep their memory alive.
+//! `Arc` to it (`Arc::get_mut` under `&mut self`). The moment an arena
+//! becomes shared - because the instance was cloned - the next allocation
+//! pushes it onto the frozen chain and starts a fresh arena. Frozen arenas
+//! are never allocated into again; they are held purely to keep their memory
+//! alive.
 
-use std::mem;
+use std::mem::{self, ManuallyDrop, MaybeUninit};
+use std::ptr;
 use std::sync::Arc;
 
-use typed_arena::Arena;
+/// Size of the first chunk an arena opens on its own, in bytes. Chunks
+/// double from there.
+const INITIAL_CHUNK_BYTES: usize = 1024;
 
-/// A single bump arena.
+/// A fixed-capacity buffer of values.
 ///
-/// Arenas are append-only: values are never removed or moved once allocated,
-/// so raw pointers to them stay valid until the arena drops.
-struct ArenaHandle<T> {
-    arena: Arena<T>,
+/// A chunk never reallocates, so a pointer into it stays valid until the
+/// chunk drops. The `Vec` is used purely as an allocation: its own length
+/// stays 0 and it never touches the slots; `len` says how many slots are
+/// initialized, and they are always a prefix.
+struct Chunk<T> {
+    buf: Vec<MaybeUninit<T>>,
+    len: usize,
 }
 
-impl<T> ArenaHandle<T> {
-    fn new() -> Self {
+impl<T> Chunk<T> {
+    fn with_capacity(capacity: usize) -> Self {
         Self {
-            arena: Arena::new(),
+            buf: Vec::with_capacity(capacity),
+            len: 0,
         }
+    }
+
+    /// Takes over a `Vec`'s buffer as a chunk holding its elements.
+    ///
+    /// No element moves: the vector's allocation becomes the chunk.
+    fn adopt(vec: Vec<T>) -> Self {
+        let mut vec = ManuallyDrop::new(vec);
+        let len = vec.len();
+        let capacity = vec.capacity();
+        let ptr = vec.as_mut_ptr() as *mut MaybeUninit<T>;
+        // SAFETY: `MaybeUninit<T>` has the same size and alignment as `T`,
+        // so the allocation matches; `len` is 0 because this chunk tracks
+        // initialization itself. The `ManuallyDrop` wrapper hands the
+        // buffer over without freeing it.
+        let buf = unsafe { Vec::from_raw_parts(ptr, 0, capacity) };
+        Self { buf, len }
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.capacity() - self.len
+    }
+
+    /// Raw pointer to slot `index`.
+    ///
+    /// Derived from the allocation pointer itself, never through a
+    /// reference to the slots, so it carries write provenance and creating
+    /// it does not invalidate pointers handed out earlier.
+    #[inline]
+    fn slot(&mut self, index: usize) -> *mut T {
+        debug_assert!(index <= self.capacity());
+        // SAFETY: `index` stays within the allocation.
+        unsafe { self.buf.as_mut_ptr().add(index) as *mut T }
+    }
+
+    /// Writes `value` into the next free slot. The caller ensures there is
+    /// room.
+    #[inline]
+    fn push(&mut self, value: T) -> *const T {
+        debug_assert!(self.len < self.capacity());
+        let ptr = self.slot(self.len);
+        // SAFETY: The slot is within capacity and not yet initialized.
+        unsafe { ptr::write(ptr, value) };
+        self.len += 1;
+        ptr
+    }
+
+    /// Moves every element of `values` into the chunk, contiguously, and
+    /// returns their pointers. The caller ensures there is room.
+    fn push_all(&mut self, mut values: Vec<T>) -> Vec<*const T> {
+        let n = values.len();
+        debug_assert!(n <= self.remaining());
+        let base = self.slot(self.len);
+        // SAFETY: `n` free slots follow `len`; the source elements are moved
+        // out and the vector's length is cleared so they are not dropped.
+        unsafe {
+            ptr::copy_nonoverlapping(values.as_ptr(), base, n);
+            values.set_len(0);
+        }
+        self.len += n;
+        // SAFETY: Every offset below `n` is an initialized slot.
+        (0..n).map(|i| unsafe { base.add(i) } as *const T).collect()
+    }
+}
+
+impl<T> Drop for Chunk<T> {
+    fn drop(&mut self) {
+        let len = self.len;
+        let base = self.slot(0);
+        // SAFETY: The first `len` slots are initialized, and the chunk is
+        // dropping, so nothing references them any more.
+        unsafe { ptr::drop_in_place(ptr::slice_from_raw_parts_mut(base, len)) };
+    }
+}
+
+/// A bump arena: chunks in allocation order, the last one being filled.
+///
+/// Values never move once allocated, so raw pointers to them stay valid
+/// until the arena drops.
+struct Arena<T> {
+    chunks: Vec<Chunk<T>>,
+}
+
+impl<T> Arena<T> {
+    fn new() -> Self {
+        Self { chunks: Vec::new() }
     }
 
     fn with_capacity(capacity: usize) -> Self {
-        Self {
-            arena: Arena::with_capacity(capacity),
+        let mut chunks = Vec::new();
+        if capacity > 0 {
+            chunks.push(Chunk::with_capacity(capacity));
         }
+        Self { chunks }
+    }
+
+    /// Returns the current chunk, opening a new one if it cannot take `n`
+    /// more values.
+    fn chunk_with_room(&mut self, n: usize) -> &mut Chunk<T> {
+        let has_room = self.chunks.last().is_some_and(|c| c.remaining() >= n);
+        if !has_room {
+            let last = self.chunks.last().map_or(0, Chunk::capacity);
+            let min = INITIAL_CHUNK_BYTES / mem::size_of::<T>().max(1);
+            let capacity = n.max(last.saturating_mul(2)).max(min).max(1);
+            self.chunks.push(Chunk::with_capacity(capacity));
+        }
+        self.chunks.last_mut().expect("a chunk was just ensured")
+    }
+
+    fn alloc(&mut self, value: T) -> *const T {
+        self.chunk_with_room(1).push(value)
+    }
+
+    /// Stores every element of `values` contiguously.
+    ///
+    /// When the current chunk has room, the elements are moved into it;
+    /// otherwise the vector's own buffer becomes the next chunk and nothing
+    /// is copied at all.
+    fn alloc_vec(&mut self, values: Vec<T>) -> Vec<*const T> {
+        let n = values.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        if self.chunks.last().is_some_and(|c| c.remaining() >= n) {
+            return self.chunk_with_room(n).push_all(values);
+        }
+        let mut chunk = Chunk::adopt(values);
+        let base = chunk.slot(0);
+        self.chunks.push(chunk);
+        // SAFETY: The adopted buffer holds `n` initialized elements.
+        (0..n).map(|i| unsafe { base.add(i) } as *const T).collect()
     }
 }
-
-// SAFETY: `Arena` is not `Sync` because allocation goes through interior
-// mutability (a RefCell). We assert `Sync` for the handle because this
-// module never calls any `Arena` method through a shared handle:
-// - Allocation happens only in `Storage::alloc`/`alloc_extend`, which first
-//   prove unique ownership of the handle's `Arc` while holding `&mut self`.
-//   With a strong count of 1 no other thread holds an `Arc` to clone, so
-//   the count cannot change concurrently.
-// - Every other owner (clones, chain nodes) holds the handle purely to keep
-//   its memory alive and never touches the `Arena` API. Element reads go
-//   through raw pointers, not through the arena.
-// `T: Sync` because `&T` is exposed on multiple threads; `T: Send` because
-// the last owner may drop the arena (and all values) on another thread.
-unsafe impl<T: Send + Sync> Sync for ArenaHandle<T> {}
 
 /// What a chain node keeps alive. The payloads are never read; they exist
 /// so their `Drop` runs when the last referencing storage goes away.
 #[allow(dead_code)]
 enum Kept<T> {
     /// A frozen ancestor arena.
-    Arena(Arc<ArenaHandle<T>>),
+    Arena(Arc<Arena<T>>),
     /// A whole foreign chain, retained by [`Storage::absorb`].
     Chain(Arc<ChainNode<T>>),
 }
@@ -94,7 +217,7 @@ impl<T> Drop for ChainNode<T> {
 /// allocation after a clone freezes the (now shared) active arena and
 /// starts a fresh private one.
 pub(crate) struct Storage<T> {
-    active: Arc<ArenaHandle<T>>,
+    active: Arc<Arena<T>>,
     frozen: Option<Arc<ChainNode<T>>>,
     /// Number of values this storage keeps alive. Exact for a single
     /// lineage; an upper bound after [`absorb`](Self::absorb), which may
@@ -105,7 +228,7 @@ pub(crate) struct Storage<T> {
 impl<T> Storage<T> {
     pub(crate) fn new() -> Self {
         Self {
-            active: Arc::new(ArenaHandle::new()),
+            active: Arc::new(Arena::new()),
             frozen: None,
             allocated: 0,
         }
@@ -113,7 +236,7 @@ impl<T> Storage<T> {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            active: Arc::new(ArenaHandle::with_capacity(capacity)),
+            active: Arc::new(Arena::with_capacity(capacity)),
             frozen: None,
             allocated: 0,
         }
@@ -132,43 +255,42 @@ impl<T> Storage<T> {
         self.allocated
     }
 
-    /// Makes `active` exclusively ours, freezing it first if it is shared.
+    /// Exclusive access to the active arena, freezing it first if it is
+    /// shared.
     ///
-    /// The strong-count check is sound because we hold `&mut self`: a count
-    /// of 1 means the only `Arc` to this arena is our own field, and no
-    /// other thread can clone an `Arc` it does not have.
-    fn ensure_unique_active(&mut self) {
+    /// Sound because we hold `&mut self`: a strong count of 1 means the
+    /// only `Arc` to this arena is our own field, and no other thread can
+    /// clone an `Arc` it does not have.
+    fn active_mut(&mut self) -> &mut Arena<T> {
         if Arc::strong_count(&self.active) > 1 {
-            let old = mem::replace(&mut self.active, Arc::new(ArenaHandle::new()));
+            let old = mem::replace(&mut self.active, Arc::new(Arena::new()));
             self.frozen = Some(Arc::new(ChainNode {
                 _kept: Kept::Arena(old),
                 next: self.frozen.take(),
             }));
         }
+        Arc::get_mut(&mut self.active).expect("active arena is uniquely owned")
     }
 
     /// Allocates a value and returns a pointer valid for this storage's
     /// lifetime (and the lifetime of every storage that later absorbs it).
     pub(crate) fn alloc(&mut self, value: T) -> *const T {
-        self.ensure_unique_active();
         self.allocated += 1;
-        // SAFETY: `active` is uniquely owned (ensured above) and we hold
-        // `&mut self`, so no other thread can reach this arena while we
-        // exercise its interior mutability.
-        let reference = self.active.arena.alloc(value);
-        // Cast through *mut so the pointer keeps write provenance for
-        // make_mut-style in-place initialization.
-        reference as *mut T as *const T
+        self.active_mut().alloc(value)
     }
 
     /// Allocates every value from the iterator, contiguously, and returns
     /// their pointers.
     pub(crate) fn alloc_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Vec<*const T> {
-        self.ensure_unique_active();
-        // SAFETY: As in `alloc`.
-        let slice = self.active.arena.alloc_extend(iter);
-        self.allocated += slice.len();
-        slice.iter_mut().map(|r| r as *mut T as *const T).collect()
+        self.alloc_vec(iter.into_iter().collect())
+    }
+
+    /// Stores every element of `values`, contiguously. When the active
+    /// arena has no room, the vector's buffer is taken over as is, so no
+    /// element is copied.
+    pub(crate) fn alloc_vec(&mut self, values: Vec<T>) -> Vec<*const T> {
+        self.allocated += values.len();
+        self.active_mut().alloc_vec(values)
     }
 
     /// Keeps every arena of `other` alive from this storage too, so raw

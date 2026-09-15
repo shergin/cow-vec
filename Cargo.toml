@@ -16,7 +16,6 @@ categories = ["data-structures", "memory-management"]
 all-features = true
 
 [dependencies]
-typed-arena = "2"
 serde = { version = "1", optional = true }
 
 [dev-dependencies]

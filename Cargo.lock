@@ -113,7 +113,6 @@ dependencies = [
  "imbl",
  "serde",
  "serde_json",
- "typed-arena",
 ]
 
 [[package]]
@@ -533,12 +532,6 @@ dependencies = [
  "serde",
  "serde_json",
 ]
-
-[[package]]
-name = "typed-arena"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
 name = "unicode-ident"

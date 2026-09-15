@@ -177,7 +177,7 @@ version around.
 | 32 chained generations, 1M | — | — | 82 ms | 2.6 ms | 7.9 ms | **1.0 ms** |
 | 10k random reads, 1M | **7.9 µs** | — | 15.9 µs¹ | 377 µs | 16.9 µs | 17.2 µs |
 | full iteration, 1M | **0.62 ms** | — | 1.07 ms¹ | 2.9 ms | 0.69 ms | 0.81 ms |
-| build from `Vec`, 100k | — | — | — | 923 µs | 265 µs | **131 µs** |
+| build from `Vec`, 100k | — | — | — | 923 µs | **14 µs** | 55 µs |
 
 ¹ measured as `Vec<Arc<T>>` (the read path is identical).
 

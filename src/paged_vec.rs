@@ -371,7 +371,7 @@ impl<T: Clone, const N: usize> PagedVec<T, N> {
         if self.storage.allocated() <= max_allocations {
             return self.clone();
         }
-        let mut fresh = Self::with_capacity(self.len);
+        let mut fresh = Self::new();
         let ptrs = fresh.storage.alloc_extend(self.iter().cloned());
         fresh.extend_ptrs(ptrs);
         fresh
@@ -424,8 +424,14 @@ impl<T, const N: usize> Extend<T> for PagedVec<T, N> {
 
 impl<T, const N: usize> From<Vec<T>> for PagedVec<T, N> {
     /// Creates a `PagedVec` from a `Vec`.
+    ///
+    /// The vector's buffer becomes the storage as is: no element is moved
+    /// or copied.
     fn from(vec: Vec<T>) -> Self {
-        vec.into_iter().collect()
+        let mut paged = Self::new();
+        let ptrs = paged.storage.alloc_vec(vec);
+        paged.extend_ptrs(ptrs);
+        paged
     }
 }
 

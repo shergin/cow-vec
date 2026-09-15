@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Storage no longer depends on `typed-arena`.** Values live in a
+  private chunk list that is only ever mutated through `Arc::get_mut`,
+  so the hand-written `Sync` impl on the arena is gone; the remaining
+  `unsafe impl`s cover only the raw-pointer tables.
+- **`From<Vec<T>>` takes over the vector's buffer** as storage for both
+  types. No element is moved or copied.
+- `CowVec::clear`, `truncate`, and `retain` on a shared pointer table copy
+  only the surviving prefix; `clear` copies nothing.
+- `PagedVec` releases trailing pages left behind by a shared `truncate`
+  on the next write that owns the root table.
+- `PagedVecIter` walks pages directly instead of calling `get` per
+  element; full iteration is about 12% faster and `fold`/`rfold` run as
+  slice walks.
+
+### Fixed
+
+- Doc comments still described 1.x's arena lock; allocation is unlocked
+  single-owner, not "lock-free" (Arc atomics remain). Access cost is now
+  described consistently as pointer hops.
+
 ## 2.0.0 — 2026-08-14
 
 ### Added

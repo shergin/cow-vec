@@ -547,7 +547,7 @@ impl<T: Clone> CowVec<T> {
 
         // Create fresh storage holding just the current elements,
         // contiguously.
-        let mut storage = Storage::with_capacity(self.len());
+        let mut storage = Storage::new();
         let new_items = storage.alloc_extend(self.iter().cloned());
 
         Self {
@@ -660,10 +660,11 @@ impl<T: fmt::Debug> fmt::Debug for CowVec<T> {
 impl<T> From<Vec<T>> for CowVec<T> {
     /// Creates a `CowVec` from a `Vec`.
     ///
-    /// All elements are allocated in one batch and stored contiguously.
+    /// The vector's buffer becomes the storage as is: no element is moved
+    /// or copied.
     fn from(vec: Vec<T>) -> Self {
-        let mut storage = Storage::with_capacity(vec.len());
-        let items = storage.alloc_extend(vec);
+        let mut storage = Storage::new();
+        let items = storage.alloc_vec(vec);
         Self {
             storage,
             items: Arc::new(items),
