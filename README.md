@@ -16,7 +16,7 @@ what happens the first time a clone writes:
 | `clone()` | O(1) | O(1) |
 | First mutation after clone | copies the whole pointer array | copies the root table + touched pages |
 | Diverge 50 elements of 4M | ~32 MB copied | ~0.4 MB copied |
-| Indexed access | 2 dependent loads | 3 dependent loads (root stays in cache) |
+| Indexed access | 1 pointer hop | 2 pointer hops (root stays in cache) |
 | `pop` / `truncate` after clone | copies pointer array once | copies nothing |
 | Extras | `sort`/`dedup`/`binary_search`, `append`, `split_off`, `splice`, `as_slice` | core API |
 
@@ -103,10 +103,10 @@ You clone a lot and mutate a little. Here is the honest lineup:
 |---|---|---|---|---|---|
 | `Vec<T>` | deep copy | (clone is the cost) | contiguous, fastest | yes | yes |
 | `Arc<Vec<T>>` + `make_mut` | O(1) | **clones all n elements** | contiguous, fastest | yes | yes |
-| `Arc<Vec<Arc<T>>>` + `make_mut` | O(1) | n Arc bumps + k allocs | 1 deref | per element | yes |
-| `imbl::Vector<T>` | O(1) | O(k log n) node copies | ~5 dependent loads at 4M | automatic | yes |
-| `CowVec<T>` | O(1) | n pointer memcpy, once | 1 deref | via compaction | no |
-| `PagedVec<T>` | O(1) | root + touched pages | 2 derefs | via compaction | no |
+| `Arc<Vec<Arc<T>>>` + `make_mut` | O(1) | n Arc bumps + k allocs | 1 hop | per element | yes |
+| `imbl::Vector<T>` | O(1) | O(k log n) node copies | ~5 hops at 4M | automatic | yes |
+| `CowVec<T>` | O(1) | n pointer memcpy, once | 1 hop | via compaction | no |
+| `PagedVec<T>` | O(1) | root + touched pages | 2 hops | via compaction | no |
 
 - If `T` is cheap to clone — numbers, small structs — use **`Arc<Vec<T>>`**
   and stop reading. Element clones are the cost this crate exists to avoid,
@@ -115,7 +115,9 @@ You clone a lot and mutate a little. Here is the honest lineup:
   versions, **`imbl`** is excellent. The trade is tree-depth access.
 - This crate's niche is **expensive-to-clone elements + snapshot-style
   work + flat, predictable access**. Divergence costs pointer copies.
-  Access stays a fixed number of loads.
+  Access stays a fixed number of pointer hops. (A "hop" here is one
+  dependent pointer dereference beyond the container's own header: what
+  `Vec<T>` pays none of and `Vec<Arc<T>>` pays one of.)
 
 ## How it works
 
@@ -140,7 +142,7 @@ touch.
 **Storage** is append-only bump arenas. An instance only allocates into an
 arena it *uniquely owns*. The first allocation after a clone freezes the
 now-shared arena onto an `Arc` keep-alive chain and starts a fresh one.
-That is why every `push`/`set` is lock-free: clones on different threads
+That is why `push`/`set` never take a lock: clones on different threads
 never fight over the same arena. Values never move, so the raw pointers in
 the structure stay valid as long as any descendant is still holding the
 chain.
@@ -151,7 +153,7 @@ chain.
 |---|---|---|
 | `clone()` | O(1) | O(1) |
 | first mutation after clone | O(n) pointer memcpy | O(PAGE_SIZE) per touched page |
-| `get()` / `[i]` | O(1), 2 loads | O(1), 3 loads |
+| `get()` / `[i]` | O(1), 1 hop | O(1), 2 hops |
 | `push()` | O(1) amortized, no lock | O(1) amortized, no lock |
 | `set()` | O(1) + COW | O(1) + page COW |
 | `pop()` / `truncate()` | O(1) + COW | O(1), copies nothing |

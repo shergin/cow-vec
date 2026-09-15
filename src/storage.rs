@@ -1,4 +1,4 @@
-//! Lock-free value storage shared by the vector types in this crate.
+//! Value storage shared by the vector types in this crate.
 //!
 //! Values live in bump arenas. Each vector instance owns an *active* arena
 //! that only it allocates into, plus a *frozen chain* of `Arc`s keeping every
@@ -88,7 +88,7 @@ impl<T> Drop for ChainNode<T> {
     }
 }
 
-/// Value storage with lock-free allocation and O(1) clone.
+/// Value storage with unlocked single-owner allocation and O(1) clone.
 ///
 /// Cloning shares the active arena and the frozen chain. The first
 /// allocation after a clone freezes the (now shared) active arena and

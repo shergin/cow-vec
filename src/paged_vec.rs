@@ -51,9 +51,10 @@ unsafe impl<T: Send + Sync, const N: usize> Sync for Page<T, N> {}
 /// elements with the default page size, diverging 50 scattered elements
 /// copies ~430 KB instead of 32 MB.
 ///
-/// The cost is one extra pointer hop on access: root -> page -> value.
-/// The root table is small (8 bytes per 1024 elements) and stays
-/// cache-resident, so indexed access remains O(1) with a fixed depth of 2.
+/// The cost is one extra pointer hop on access compared to `CowVec`:
+/// root table entry, then page slot, then value. The root table is small
+/// (8 bytes per 1024 elements) and stays cache-resident, so indexed access
+/// remains O(1) with a fixed depth.
 ///
 /// # Page size
 /// `PAGE_SIZE` must be a power of two. Larger pages mean cheaper indexing
@@ -61,8 +62,8 @@ unsafe impl<T: Send + Sync, const N: usize> Sync for Page<T, N> {}
 /// (8 KB pages) suits most workloads.
 ///
 /// # Thread Safety
-/// `PagedVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation is
-/// lock-free, as with `CowVec`.
+/// `PagedVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation
+/// takes no lock, as with `CowVec`.
 ///
 /// # Example
 /// ```
@@ -156,7 +157,8 @@ impl<T, const PAGE_SIZE: usize> PagedVec<T, PAGE_SIZE> {
     }
 
     /// Returns a reference to the element at the given index, or `None` if
-    /// out of bounds. Two dependent loads: page table entry, then value.
+    /// out of bounds. Two pointer hops: root table entry to the page, page
+    /// slot to the value.
     #[inline]
     pub fn get(&self, index: usize) -> Option<&T> {
         if index >= self.len {
@@ -408,7 +410,8 @@ impl<T: Clone, const N: usize> From<&[T]> for PagedVec<T, N> {
 
 impl<T: PartialEq, const N: usize> PartialEq for PagedVec<T, N> {
     /// Compares element by element, with an O(1) fast path for clones that
-    /// still share their root table.
+    /// still share their root table. As with `CowVec`, that fast path
+    /// ignores non-reflexive equality such as `f64::NAN`.
     fn eq(&self, other: &Self) -> bool {
         (self.len == other.len && Arc::ptr_eq(&self.pages, &other.pages))
             || (self.len == other.len && self.iter().zip(other.iter()).all(|(a, b)| a == b))

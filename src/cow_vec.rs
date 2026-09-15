@@ -18,9 +18,9 @@ use crate::storage::Storage;
 /// clones continue to see the original value.
 ///
 /// # Thread Safety
-/// `CowVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation is
-/// lock-free: each instance only ever allocates into an arena it uniquely
-/// owns, so clones on different threads never contend.
+/// `CowVec<T>` is `Send` and `Sync` when `T: Send + Sync`. Allocation
+/// takes no lock: each instance only ever allocates into an arena it
+/// uniquely owns, so clones on different threads never contend.
 ///
 /// # Example
 /// ```
@@ -38,8 +38,8 @@ pub struct CowVec<T> {
 }
 
 // SAFETY: CowVec is Send+Sync when T: Send+Sync because:
-// - Storage<T> allocates lock-free but only ever through the instance that
-//   uniquely owns the active arena, under &mut self (see storage.rs).
+// - Storage<T> allocates without a lock but only ever through the instance
+//   that uniquely owns the active arena, under &mut self (see storage.rs).
 // - The *const T items point into arenas that the storage keeps alive, and
 //   only &T is ever exposed through them (T: Sync); the last owner may drop
 //   the values on any thread (T: Send).
@@ -480,7 +480,7 @@ impl<T> CowVec<T> {
             Bound::Unbounded => self.len(),
         };
 
-        // Allocate new elements in arena under a single lock
+        // Allocate new elements in one batch.
         let new_ptrs = self.storage.alloc_extend(replace_with);
 
         // Splice the pointer vector and clone out the removed values
@@ -637,8 +637,7 @@ impl<T: fmt::Debug> fmt::Debug for CowVec<T> {
 impl<T> From<Vec<T>> for CowVec<T> {
     /// Creates a `CowVec` from a `Vec`.
     ///
-    /// All elements are allocated under a single arena lock and stored
-    /// contiguously.
+    /// All elements are allocated in one batch and stored contiguously.
     fn from(vec: Vec<T>) -> Self {
         let mut storage = Storage::with_capacity(vec.len());
         let items = storage.alloc_extend(vec);
@@ -652,8 +651,7 @@ impl<T> From<Vec<T>> for CowVec<T> {
 impl<T> Extend<T> for CowVec<T> {
     /// Extends the vector with elements from an iterator.
     ///
-    /// All elements are allocated under a single arena lock and stored
-    /// contiguously.
+    /// All elements are allocated in one batch and stored contiguously.
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let ptrs = self.storage.alloc_extend(iter);
         self.items_mut().extend(ptrs);
@@ -663,8 +661,7 @@ impl<T> Extend<T> for CowVec<T> {
 impl<T> FromIterator<T> for CowVec<T> {
     /// Creates a `CowVec` from an iterator.
     ///
-    /// All elements are allocated under a single arena lock and stored
-    /// contiguously.
+    /// All elements are allocated in one batch and stored contiguously.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut storage = Storage::new();
         let items = storage.alloc_extend(iter);
@@ -686,7 +683,9 @@ impl<T: PartialEq> PartialEq for CowVec<T> {
     /// Compares two vectors element by element.
     ///
     /// Vectors that share their structure (e.g. un-diverged clones) compare
-    /// equal in O(1) without touching any elements.
+    /// equal in O(1) without touching any elements. That shortcut also
+    /// applies when `T`'s equality is not reflexive: a vector containing
+    /// `f64::NAN` equals its own clone, where `Vec` would say otherwise.
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.items, &other.items)
             || (self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a == b))
