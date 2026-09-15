@@ -197,6 +197,19 @@ What the numbers actually mean:
   7.5× faster than `CowVec` (which recopies the whole pointer table every
   generation) and 2.5× faster than `imbl`.
 
+Time is the weaker half of the chained-generation story. Keeping 32
+versions of a 1M-element vector alive costs this much memory beyond the
+base vector (`cargo run --release --example memory`):
+
+| | `Arc<Vec<Arc>>` | `imbl` | `CowVec` | `PagedVec` |
+|---|---|---|---|---|
+| extra memory, 32 live versions | 244 MB | 7.5 MB | 244 MB | **12.6 MB** |
+| per version | 7.6 MB | 0.24 MB | 7.6 MB | 0.39 MB |
+
+Every `CowVec` version keeps its own 8 MB pointer table, exactly like
+`Arc<Vec<Arc<T>>>`; a `PagedVec` version shares every page it did not
+touch, so 50 edits cost about 50 pages plus a root table.
+
 Reproduce with `cargo bench`. Hardware moves the numbers; the *ratios*
 are the point.
 
